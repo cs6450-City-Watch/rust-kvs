@@ -124,7 +124,7 @@ impl Kvs for KvsServer {
     }
     async fn commit(self, _: Context, tx_no: u64) -> KvsResult<()> {
         let tx_id = (self.0, tx_no);
-        //println!("commit hit");
+        println!("commit hit");
         if let None = write_aheads.get(&tx_id) {
             return Err(kvsinterface::KvsError::TransactionDoesntExist(tx_id));
         }
@@ -135,13 +135,11 @@ impl Kvs for KvsServer {
             store.insert(entry.0.clone(), *entry.1);
         }
 
-        /*
         println!(
             "before drop: write_aheads: {:?}, lock_sets: {:?}",
             write_aheads.clone().iter().count(),
             lock_sets.clone().iter().count()
         );
-        */
 
         write_aheads.remove(&tx_id);
         lock_sets.remove(&tx_id);
@@ -149,19 +147,17 @@ impl Kvs for KvsServer {
     }
     async fn abort(self, _: Context, tx_no: u64) -> KvsResult<()> {
         let tx_id = (self.0, tx_no);
-        //println!("abort hit");
+        println!("abort hit");
         if let Entry::Vacant(_) = write_aheads.entry(tx_id) {
             return Err(kvsinterface::KvsError::TransactionDoesntExist(tx_id));
         }
         // deallocate everything from this transaction
 
-        /*
         println!(
             "before drop: write_aheads: {:?}, lock_sets: {:?}",
             write_aheads.clone().iter().count(),
             lock_sets.clone().iter().count()
         );
-        */
 
         write_aheads.remove(&tx_id);
         lock_sets.remove(&tx_id);

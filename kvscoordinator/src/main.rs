@@ -1,7 +1,11 @@
 use clap::Parser;
-use kvsinterface::KvsClient;
+use kvsinterface::{KvsClient, KvsResult};
 use std::{net::SocketAddr, time::Duration};
-use tarpc::{client, context, tokio_serde::formats::Json};
+use tarpc::{
+    client::{self, RpcError},
+    context,
+    tokio_serde::formats::Json,
+};
 use tokio::time::sleep;
 
 #[derive(Parser)]
@@ -10,6 +14,71 @@ struct Flags {
     server_addr: SocketAddr,
     #[clap(long, default_value_t = 0)]
     first_transaction: u64,
+}
+
+#[derive(Clone, Debug)]
+enum KvsOperation {
+    Begin,
+    Get(String),
+    Put(String, u64),
+    Commit,
+    Abort,
+}
+
+impl KvsOperation {
+    async fn run(&self, client: &KvsClient, tx_no: u64) -> KvsResult<Option<u64>> {
+        loop {
+            if let Self::Get(key) = self {
+                let rpc_res = client.get(context::current(), tx_no, key.to_string()).await;
+                match rpc_res {
+                    Ok(Ok(key)) => return Ok(Some(key)),
+                    Ok(Err(e)) => return Err(e),
+                    _ => continue,
+                }
+            }
+
+            let rpc_res = match self {
+                Self::Begin => client.begin(context::current(), tx_no).await,
+                Self::Put(key, val) => {
+                    client
+                        .put(context::current(), tx_no, key.to_string(), *val)
+                        .await
+                }
+                Self::Commit => client.commit(context::current(), tx_no).await,
+                Self::Abort => client.abort(context::current(), tx_no).await,
+                Self::Get(_) => unreachable!(),
+            };
+            match rpc_res {
+                Ok(Ok(())) => return Ok(None),
+                Ok(Err(e)) => return Err(e),
+                _ => continue,
+            }
+        }
+    }
+}
+
+async fn run_transaction(client: &KvsClient, tx_no: u64, ops: Vec<KvsOperation>) {
+    if let Err(_) = KvsOperation::Begin.run(client, tx_no).await {
+        return;
+    }
+    let mut should_abort = false;
+    for op in ops.iter() {
+        let res = op.run(client, tx_no).await;
+        println!("res: {:?}", res);
+        if let Err(_) = res {
+            should_abort = true;
+            break;
+        }
+    }
+    let decision = if should_abort {
+        KvsOperation::Abort
+    } else {
+        KvsOperation::Commit
+    };
+    decision
+        .run(&client, tx_no)
+        .await
+        .expect("txID validity should be checked by here");
 }
 
 #[tokio::main]
@@ -23,84 +92,16 @@ async fn main() -> anyhow::Result<()> {
     // config and any Transport as input.
     let client = KvsClient::new(client::Config::default(), transport.await?).spawn();
 
-    for i in 0..3 {
-        let mut should_abort = false;
-
-        match client.begin(context::current(), flags.first_transaction + i + 0).await {
-            Ok(response) => println!("got the response: {:?}", response),
-            Err(e) => println!("got the RPC error: {}", e),
-        }
-
-        match client.put(context::current(), flags.first_transaction + i + 0, "Hello".into(), 42).await {
-            Ok(response) => {
-                println!("got the response: {:?}", response);
-                if let Err(_) = response {
-                    should_abort = true;
-                    println!("aborting");
-                }
-            },
-            Err(e) => println!("got the RPC error: {}", e),
-        }
-
-        match client.put(context::current(), flags.first_transaction + i + 0, "World".into(), 43).await {
-            Ok(response) => {
-                println!("got the response: {:?}", response);
-                if let Err(_) = response {
-                    should_abort = true;
-                    println!("aborting");
-                }
-            },
-            Err(e) => println!("got the RPC error: {}", e),
-        }
-
-        let res = if should_abort {
-            client.abort(context::current(), flags.first_transaction + i + 0).await
-        } else {
-            client.commit(context::current(), flags.first_transaction + i + 0).await
-        };
-        match res {
-            Ok(response) => println!("got the response: {:?}", response),
-            Err(e) => println!("got the RPC error: {}", e),
-        }
-
-        should_abort = false;
-
-        match client.begin(context::current(), flags.first_transaction + i + 1).await {
-            Ok(response) => println!("got the response: {:?}", response),
-            Err(e) => println!("got the RPC error: {}", e),
-        }
-
-        match client.get(context::current(), flags.first_transaction + i + 1, "Hello".into()).await {
-            Ok(response) => {
-                println!("got the response: {:?}", response);
-                if let Err(_) = response {
-                    should_abort = true;
-                    println!("aborting");
-                }
-            },
-            Err(e) => println!("got the RPC error: {}", e),
-        }
-
-        match client.put(context::current(), flags.first_transaction + i + 1, "World".into(), 42).await {
-            Ok(response) => {
-                println!("got the response: {:?}", response);
-                if let Err(_) = response {
-                    should_abort = true;
-                    println!("aborting");
-                }
-            },
-            Err(e) => println!("got the RPC error: {}", e),
-        }
-
-        let res = if should_abort {
-            client.abort(context::current(), flags.first_transaction + i + 1).await
-        } else {
-            client.commit(context::current(), flags.first_transaction + i + 1).await
-        };
-        match res {
-            Ok(response) => println!("got the response: {:?}", response),
-            Err(e) => println!("got the RPC error: {}", e),
-        }
+    for i in 0..100 {
+        run_transaction(
+            &client,
+            i,
+            vec![
+                KvsOperation::Put("Hello".into(), i),
+                KvsOperation::Get("Hello".into()),
+            ],
+        )
+        .await;
     }
 
     // idk I think the example client does this for a reason though
