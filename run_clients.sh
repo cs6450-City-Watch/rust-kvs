@@ -1,5 +1,5 @@
 #/bin/env bash
 
-ssh node1 "/mnt/nfs/kvs/kvscoordinator/target/debug/kvscoordinator --server-addr 10.10.1.1:8080 > $PWD/node1.out" &
-ssh node2 "/mnt/nfs/kvs/kvscoordinator/target/debug/kvscoordinator --server-addr 10.10.1.1:8080 > $PWD/node2.out" &
+ssh node2 '(time /mnt/nfs/kvs/kvscoordinator/target/debug/kvscoordinator -n 2) > /mnt/nfs/kvs/node2.out 2>&1' &
+ssh node3 '(time /mnt/nfs/kvs/kvscoordinator/target/debug/kvscoordinator -n 2) > /mnt/nfs/kvs/node3.out 2>&1' &
 

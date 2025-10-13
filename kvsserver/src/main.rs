@@ -23,6 +23,8 @@ struct Flags {
     port: u16,
     #[clap(long, short, default_value_t = 0)]
     node_id: u16,
+    #[clap(long, short, action)]
+    localhost: bool,
 }
 
 #[derive(Copy, Clone)]
@@ -124,7 +126,6 @@ impl Kvs for KvsServer {
     }
     async fn commit(self, _: Context, tx_no: u64) -> KvsResult<()> {
         let tx_id = (self.0, tx_no);
-        println!("commit hit");
         if let None = write_aheads.get(&tx_id) {
             return Err(kvsinterface::KvsError::TransactionDoesntExist(tx_id));
         }
@@ -135,29 +136,16 @@ impl Kvs for KvsServer {
             store.insert(entry.0.clone(), *entry.1);
         }
 
-        println!(
-            "before drop: write_aheads: {:?}, lock_sets: {:?}",
-            write_aheads.clone().iter().count(),
-            lock_sets.clone().iter().count()
-        );
-
         write_aheads.remove(&tx_id);
         lock_sets.remove(&tx_id);
         Ok(())
     }
     async fn abort(self, _: Context, tx_no: u64) -> KvsResult<()> {
         let tx_id = (self.0, tx_no);
-        println!("abort hit");
         if let Entry::Vacant(_) = write_aheads.entry(tx_id) {
             return Err(kvsinterface::KvsError::TransactionDoesntExist(tx_id));
         }
         // deallocate everything from this transaction
-
-        println!(
-            "before drop: write_aheads: {:?}, lock_sets: {:?}",
-            write_aheads.clone().iter().count(),
-            lock_sets.clone().iter().count()
-        );
 
         write_aheads.remove(&tx_id);
         lock_sets.remove(&tx_id);
@@ -173,8 +161,15 @@ async fn spawn(fut: impl Future<Output = ()> + Send + 'static) {
 async fn main() -> anyhow::Result<()> {
     let flags = Flags::parse();
 
-    let server_addr = (format!("node{}", flags.node_id), flags.port);
-    let mut listener = tarpc::serde_transport::tcp::listen(&server_addr, Json::default).await?;
+    let mut listener = if flags.localhost {
+        let server_addr = ("localhost", flags.port);
+        println!("listening on: {:?}", server_addr);
+        tarpc::serde_transport::tcp::listen(&server_addr, Json::default).await?
+    } else {
+        let server_addr = (format!("node{}", flags.node_id), flags.port);
+        println!("listening on: {:?}", server_addr);
+        tarpc::serde_transport::tcp::listen(&server_addr, Json::default).await?
+    };
 
     listener.config_mut().max_frame_length(usize::MAX);
     listener
