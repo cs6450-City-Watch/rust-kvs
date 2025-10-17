@@ -15,6 +15,12 @@ use std::{
     // time::Duration, // use when relying on truetime
 };
 
+pub mod sometime {
+    tonic::include_proto!("sometime");
+}
+
+use sometime::some_time_client::SomeTimeClient;
+
 use kvsinterface::{Kvs, KvsResult, TransactionIdentifier};
 
 #[derive(Parser)]
