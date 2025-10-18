@@ -71,6 +71,23 @@ lazy_static! {
     static ref lock_sets: Arc<DashMap<TransactionIdentifier, DashMap<String, LockType>>> = Arc::new(DashMap::new());
     // organizes write-ahead buffers for each transaction
     static ref write_aheads: Arc<DashMap<TransactionIdentifier, HashMap<String, u64>>> = Arc::new(DashMap::new());
+    // maps tx_ids to relevant timestamps. the timestamp for a transaction ensures the transaction only reads from
+    // any version at most as old as itself.
+    static ref tx_timestamps: Arc<DashMap<TransactionIdentifier, SystemTime>> = Arc::new(DashMap::new());
+}
+
+#[derive(Copy, Clone)]
+struct SomeTimeTS {
+    pub earliest: SystemTime,
+    pub latest: SystemTime,
+}
+
+/// TODO: replace this with an actual TS RPC. Should of course reflect our semantics on what earliest and latest are.
+fn now() -> SomeTimeTS {
+    SomeTimeTS {
+        earliest: SystemTime::now(),
+        latest: SystemTime::now(),
+    }
 }
 
 /// Checks for existing locks for a key. Filters out `tx_id`.
@@ -104,6 +121,7 @@ impl Kvs for KvsServer {
         // acquiring this entry is an implicit lock acquiring, at least for the moment.
         // remember: the ENTRY is being locked.
         let tx_id = (self.0, tx_no);
+        tx_timestamps.insert(tx_id, now().latest);
         match write_aheads.entry(tx_id) {
             Entry::Occupied(_) => Err(kvsinterface::KvsError::TransactionExists(tx_id)),
             Entry::Vacant(write_ahead_entry) => {
