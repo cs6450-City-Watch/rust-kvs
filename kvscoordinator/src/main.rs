@@ -8,6 +8,8 @@ use std::{
 use tarpc::{client, context, tokio_serde::formats::Json};
 use tokio::time::sleep;
 
+use std::time::SystemTime;
+
 #[derive(Parser)]
 struct Flags {
     #[clap(long, short, default_value_t = String::from("node"), help = "Base of hostname on LAN for a server, e.g. the \"node\" in \"node0\"")]
@@ -33,6 +35,13 @@ struct Flags {
         help = "Ignores other configuration like server_base, num_servers, etc and only works over the loopback"
     )]
     localhost: bool,
+    #[clap(
+        long,
+        short,
+        default_value = None,
+        help = "Ignores other configuration and just directly connects to one IP address."
+    )]
+    ip_addr: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -116,7 +125,6 @@ fn get_relevant_clients(
         relevant_client_idxs.insert(idx);
     }
 
-
     relevant_client_idxs
         .iter()
         .map(|idx| clients[idx.to_owned()].clone())
@@ -164,7 +172,16 @@ async fn run_transaction(
 async fn main() -> anyhow::Result<()> {
     let flags = Flags::parse();
 
-    let clients = if flags.localhost {
+    let clients = if let Some(addr) = flags.ip_addr {
+        println!("connecting to {}", addr);
+        let mut transport = tarpc::serde_transport::tcp::connect(
+            format!("{}:{}", addr, flags.port_no),
+            Json::default,
+        );
+        transport.config_mut().max_frame_length(usize::MAX);
+        vec![KvsClient::new(client::Config::default(), transport.await?).spawn()]
+    } else if flags.localhost {
+        println!("Connecting to localhost");
         let mut transport = tarpc::serde_transport::tcp::connect(
             format!("localhost:{}", flags.port_no),
             Json::default,
@@ -175,7 +192,10 @@ async fn main() -> anyhow::Result<()> {
     } else {
         let mut clients = Vec::with_capacity(3);
         for i in 0..flags.num_servers {
-            println!("connecting to: {}{}:{}", flags.server_base, i, flags.port_no);
+            println!(
+                "connecting to: {}{}:{}",
+                flags.server_base, i, flags.port_no
+            );
             let mut transport = tarpc::serde_transport::tcp::connect(
                 format!("{}{}:{}", flags.server_base, i, flags.port_no),
                 Json::default,

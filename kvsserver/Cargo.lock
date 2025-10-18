@@ -700,6 +700,7 @@ dependencies = [
  "prost",
  "prost-types",
  "protobuf-src",
+ "serde",
  "tarpc",
  "tokio",
  "tonic",

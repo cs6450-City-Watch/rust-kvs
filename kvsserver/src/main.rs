@@ -2,12 +2,14 @@ use clap::Parser;
 use dashmap::{DashMap, Entry};
 use futures::{future, prelude::*};
 use lazy_static::lazy_static;
-use std::sync::Arc;
+use std::{sync::Arc, time::SystemTime};
 use tarpc::{
     context::Context,
     server::{self, Channel, incoming::Incoming},
     tokio_serde::formats::Json,
 };
+
+use serde::{Deserialize, Serialize};
 
 use std::net::SocketAddr;
 use std::{
@@ -31,6 +33,29 @@ struct Flags {
     node_id: u16,
     #[clap(long, short, action)]
     localhost: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TimeStampedEntry {
+    pub ts: SystemTime,
+    pub key: String,
+    pub val: u64,
+}
+
+// not at all fault-tolerant; still applicable since we're more just trying to get consistency across replicas
+// also like the Kvs service, it could be argued that this should be using tonic to not be stuck with rust
+#[tarpc::service]
+pub trait KvsReplica {
+    async fn append_entries(entries: Vec<TimeStampedEntry>) -> KvsResult<()>;
+}
+
+#[derive(Clone)]
+struct KvsReplicator;
+
+impl KvsReplica for KvsReplicator {
+    async fn append_entries(self, _: Context, entries: Vec<TimeStampedEntry>) -> KvsResult<()> {
+        todo!()
+    }
 }
 
 #[derive(Copy, Clone)]
@@ -73,6 +98,9 @@ struct KvsServer(SocketAddr);
 
 impl Kvs for KvsServer {
     async fn begin(self, _: Context, tx_no: u64) -> KvsResult<()> {
+        unimplemented!(
+            "need to accomodate for timestamps (some other metadata associating transaction IDs with timing)"
+        );
         // acquiring this entry is an implicit lock acquiring, at least for the moment.
         // remember: the ENTRY is being locked.
         let tx_id = (self.0, tx_no);
@@ -131,6 +159,9 @@ impl Kvs for KvsServer {
         }
     }
     async fn commit(self, _: Context, tx_no: u64) -> KvsResult<()> {
+        unimplemented!(
+            "need to assign timestamps to every write in this transaction and then share with other replicas, as well as everything with commit-wait"
+        );
         let tx_id = (self.0, tx_no);
         if let None = write_aheads.get(&tx_id) {
             return Err(kvsinterface::KvsError::TransactionDoesntExist(tx_id));
