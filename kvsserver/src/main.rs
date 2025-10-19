@@ -1,5 +1,5 @@
 use clap::Parser;
-use dashmap::{DashMap, Entry};
+use dashmap::{DashMap, DashSet, Entry};
 use futures::{future, prelude::*};
 use lazy_static::lazy_static;
 use std::{
@@ -57,7 +57,7 @@ struct KvsReplicator;
 
 impl KvsReplica for KvsReplicator {
     async fn append_entries(self, _: Context, entries: Vec<TimeStampedEntry>) -> KvsResult<()> {
-        todo!()
+        unimplemented!()
     }
 }
 
@@ -65,10 +65,14 @@ lazy_static! {
     // store is the actual stored values. This is this node's portion of the distributed kvs.
     // TODO: probably unnecessary with versions
     static ref store: Arc<DashMap<String, u64>> = Arc::new(DashMap::new());
+    // timestamped versions of the store
     static ref versions: Arc<DashMap<SystemTime, DashMap<String, u64>>> = Arc::new(DashMap::new());
-    // time stamp of most recent read operation for an element
-    // TODO: need to accommodate for more than one read timestamp
-    static ref read_stamps: Arc<DashMap<String, SystemTime>> = Arc::new(DashMap::new());
+
+    // time stamps of most recent read ops for an element
+    static ref read_stamps: Arc<DashMap<String, DashSet<(TransactionIdentifier, SystemTime)>>> = Arc::new(DashMap::new());
+    // transaction_reads really only used for easier deallocation in read_stamps
+    static ref transaction_reads: Arc<DashMap<TransactionIdentifier, DashSet<String>>> = Arc::new(DashMap::new());
+
     // organizes write-ahead buffers for each transaction
     static ref write_aheads: Arc<DashMap<TransactionIdentifier, HashMap<String, u64>>> = Arc::new(DashMap::new());
 
@@ -110,11 +114,9 @@ fn now() -> SomeTimeTS {
 
 /// waits until `ts` has passed.
 async fn elapse(ts: SystemTime) {
-    loop {
-        if ts.elapsed().is_err() {
-            // `elapsed` defined to be an error if the time is in the future
-            sleep(Duration::from_millis(100)).await;
-        }
+    while ts.elapsed().is_err() {
+        // `elapsed` defined to be an error if the time is in the future
+        sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -128,8 +130,10 @@ impl Kvs for KvsServer {
         match tx_timestamps.entry(tx_id) {
             Entry::Occupied(_) => Err(kvsinterface::KvsError::TransactionExists(tx_id)),
             Entry::Vacant(timestamps_entry) => {
-                timestamps_entry.insert(now().latest); // TODO: do we actually want earliest here?
+                // allocate resources to track transaction
+                timestamps_entry.insert(now().earliest); // TODO: do we want earliest or latest here?
                 write_aheads.insert(tx_id, HashMap::new());
+                transaction_reads.insert(tx_id, DashSet::new());
 
                 Ok(())
             }
@@ -148,7 +152,7 @@ impl Kvs for KvsServer {
                 match versions.get(&relevant_version_ts).unwrap().get(&key) {
                     None => Err(KvsError::KeyDoesntExist(key)),
                     Some(entry) => {
-                        read_stamps.insert(key, *ts);
+                        mark_read(tx_id, *ts, key);
                         Ok(*entry)
                     }
                 }
@@ -161,34 +165,41 @@ impl Kvs for KvsServer {
     async fn put(self, _: Context, tx_no: u64, key: String, val: u64) -> KvsResult<()> {
         let tx_id = (self.0, tx_no);
         // check that we can write at all
-        match tx_timestamps.get(&tx_id) {
+        let tx_ts = match tx_timestamps.get(&tx_id) {
             None => return Err(KvsError::TransactionDoesntExist(tx_id)),
-            Some(write_ts) => match read_stamps.get(&key) {
-                None => (),
-                Some(read_ts) => {
-                    if *write_ts <= *read_ts {
-                        return Err(KvsError::LockConflict { tx_id, key });
-                    }
-                }
-            },
+            Some(write_ts) => *write_ts,
         };
+        match read_stamps.get(&key) {
+            None => (),
+            Some(stamps) => {
+                if tx_ts
+                    <= stamps
+                        .iter()
+                        .fold(SystemTime::UNIX_EPOCH, |a, b| a.max(b.1))
+                {
+                    return Err(KvsError::LockConflict { tx_id, key });
+                }
+            }
+        }
         match write_aheads.entry(tx_id) {
             Entry::Vacant(_) => Err(kvsinterface::KvsError::TransactionDoesntExist(tx_id)),
             Entry::Occupied(mut write_ahead_entry) => {
+                mark_read(tx_id, tx_ts, key.to_owned());
                 write_ahead_entry.get_mut().insert(key, val);
                 Ok(())
             }
         }
     }
-    // TODO: check if oldest transaction
-    // if so, clean up older versions
+    // invariant of ST timestamps monotonically increasing implies latest version -> version before now().earliest,
+    // then copy all writes over, wait until now().latest, and commit
     async fn commit(self, _: Context, tx_no: u64) -> KvsResult<()> {
         let tx_id = (self.0, tx_no);
         let ts = match tx_timestamps.get(&tx_id) {
             None => return Err(KvsError::TransactionDoesntExist(tx_id)),
             Some(ts) => *ts,
         };
-        let latest_version_ts = latest_before(ts);
+        let time = now();
+        let latest_version_ts = latest_before(time.earliest);
         let this_version = if latest_version_ts == SystemTime::UNIX_EPOCH {
             DashMap::new()
         } else {
@@ -204,27 +215,77 @@ impl Kvs for KvsServer {
             this_version.insert(entry.0.clone(), *entry.1);
         }
 
-        let commit_ts = now().latest;
-        elapse(commit_ts).await;
-        versions.insert(commit_ts, this_version);
+        // TODO: the order here seems a little fucky. revisit.
+        elapse(time.latest).await;
+        versions.insert(time.latest, this_version);
         // TODO: notify replica. do we want to line this up with our sleep?
 
-        write_aheads.remove(&tx_id);
-        // lock_sets.remove(&tx_id);
+        deallocate_transaction(tx_id, ts);
         Ok(())
     }
-    // TODO: check if oldest transaction
-    // if so, clean up older versions
     async fn abort(self, _: Context, tx_no: u64) -> KvsResult<()> {
         let tx_id = (self.0, tx_no);
-        if let Entry::Vacant(_) = write_aheads.entry(tx_id) {
-            return Err(kvsinterface::KvsError::TransactionDoesntExist(tx_id));
-        }
-        // deallocate everything from this transaction
+        let ts = match tx_timestamps.get(&tx_id) {
+            None => return Err(KvsError::TransactionDoesntExist(tx_id)),
+            Some(ts) => *ts,
+        };
 
-        write_aheads.remove(&tx_id);
+        deallocate_transaction(tx_id, ts);
         Ok(())
     }
+}
+
+fn deallocate_transaction(tx_id: TransactionIdentifier, tx_ts: SystemTime) {
+    // check if we also need to deallocate versions
+    // invariant: timestamps are monotonically increasing
+    if is_oldest(tx_ts) {
+        let mut prior_version = latest_before(tx_ts);
+        while prior_version != SystemTime::UNIX_EPOCH {
+            versions.remove(&prior_version);
+            prior_version = latest_before(tx_ts);
+        }
+    }
+
+    // deallocate write-ahead buffer
+    write_aheads.remove(&tx_id);
+
+    // remove read markers, key-side
+    for read_key in transaction_reads
+        .get(&tx_id)
+        .expect("deallocating reads on nonexistent transaction")
+        .iter()
+    {
+        read_stamps
+            .get_mut(&*read_key) // kind of ugly. First need to get the string, then need to borrow it.
+            .expect(&format!(
+                "read_stamps set for given key {} does not exist",
+                *read_key
+            ))
+            .remove(&(tx_id, tx_ts));
+    }
+
+    // remove read markers, tx side
+    transaction_reads.remove(&tx_id);
+    // remove entry for transaction timestamp
+    tx_timestamps.remove(&tx_id);
+}
+
+fn mark_read(tx_id: TransactionIdentifier, tx_ts: SystemTime, key: String) {
+    // XXX: currently unsure of why dashmaps can be immutable on insert
+    match read_stamps.entry(key.to_owned()) {
+        Entry::Vacant(entry) => {
+            let ds = DashSet::with_capacity(3);
+            ds.insert((tx_id, tx_ts));
+            entry.insert(ds);
+        }
+        Entry::Occupied(entry) => {
+            entry.get().insert((tx_id, tx_ts));
+        }
+    }
+    transaction_reads
+        .get_mut(&tx_id)
+        .expect("no transaction read buffer allocated for valid transaction ID")
+        .insert(key);
 }
 
 async fn spawn(fut: impl Future<Output = ()> + Send + 'static) {
