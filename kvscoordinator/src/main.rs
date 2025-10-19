@@ -96,24 +96,16 @@ impl KvsOperation {
     }
 }
 
-fn get_relevant_client(
-    clients: &Vec<KvsClient>,
-    num_servers: &u64,
-    op: &KvsOperation,
-) -> KvsClient {
+/// gets the index of the relevant client
+fn get_relevant_client(num_servers: &u64, op: &KvsOperation) -> usize {
     let mut s = DefaultHasher::new();
     op.hash(&mut s);
     let hash = s.finish();
     let idx = (hash % num_servers) as usize;
-    let client = clients[idx].clone();
-    client
+    idx
 }
 
-fn get_relevant_clients(
-    clients: &Vec<KvsClient>,
-    num_servers: &u64,
-    ops: &Vec<KvsOperation>,
-) -> Vec<KvsClient> {
+fn get_relevant_clients(num_servers: &u64, ops: &Vec<KvsOperation>) -> HashSet<usize> {
     // KvsClient does not impl Eq, so we need to work around it with indices into clients
     let mut relevant_client_idxs = HashSet::with_capacity(3);
 
@@ -126,9 +118,6 @@ fn get_relevant_clients(
     }
 
     relevant_client_idxs
-        .iter()
-        .map(|idx| clients[idx.to_owned()].clone())
-        .collect()
 }
 
 async fn run_transaction(
@@ -137,14 +126,16 @@ async fn run_transaction(
     tx_no: u64,
     ops: Vec<KvsOperation>,
 ) -> KvsResult<()> {
-    let relevant_clients = get_relevant_clients(clients, &num_servers, &ops);
-    for client in relevant_clients.clone().iter() {
-        KvsOperation::Begin.run(client, tx_no).await?;
+    let relevant_clients = get_relevant_clients(&num_servers, &ops);
+    for client_idx in relevant_clients.clone().iter() {
+        KvsOperation::Begin
+            .run(&clients[*client_idx], tx_no)
+            .await?;
     }
     let mut should_abort = false;
     for op in ops.iter() {
-        let client = get_relevant_client(clients, &num_servers, op);
-        let res = op.run(&client, tx_no).await;
+        let client_idx = get_relevant_client(&num_servers, op);
+        let res = op.run(&clients[client_idx], tx_no).await;
         println!("res: {:?}", res);
         if let Err(_) = res {
             should_abort = true;
@@ -158,9 +149,9 @@ async fn run_transaction(
         println!("committing");
         KvsOperation::Commit
     };
-    for client in relevant_clients.iter() {
+    for client_idx in relevant_clients.iter() {
         decision
-            .run(&client, tx_no)
+            .run(&clients[*client_idx], tx_no)
             .await
             .expect("txID validity should be checked by here");
     }
