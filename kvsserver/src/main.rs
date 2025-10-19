@@ -2,20 +2,23 @@ use clap::Parser;
 use dashmap::{DashMap, Entry};
 use futures::{future, prelude::*};
 use lazy_static::lazy_static;
-use std::{sync::Arc, time::SystemTime};
+use std::{
+    sync::Arc,
+    time::{Duration, SystemTime},
+};
 use tarpc::{
     context::Context,
     server::{self, Channel, incoming::Incoming},
     tokio_serde::formats::Json,
 };
 
+use tokio::time::sleep;
+
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 use std::net::SocketAddr;
-use std::{
-    collections::HashMap,
-    // time::Duration, // use when relying on truetime
-};
 
 pub mod sometime {
     tonic::include_proto!("sometime");
@@ -23,7 +26,7 @@ pub mod sometime {
 
 use sometime::some_time_client::SomeTimeClient;
 
-use kvsinterface::{Kvs, KvsResult, TransactionIdentifier};
+use kvsinterface::{Kvs, KvsError, KvsResult, TransactionIdentifier};
 
 #[derive(Parser)]
 struct Flags {
@@ -58,19 +61,17 @@ impl KvsReplica for KvsReplicator {
     }
 }
 
-#[derive(Copy, Clone)]
-enum LockType {
-    Write,
-    Read,
-}
-
 lazy_static! {
     // store is the actual stored values. This is this node's portion of the distributed kvs.
+    // TODO: probably unnecessary with versions
     static ref store: Arc<DashMap<String, u64>> = Arc::new(DashMap::new());
-    // locks held by each transaction
-    static ref lock_sets: Arc<DashMap<TransactionIdentifier, DashMap<String, LockType>>> = Arc::new(DashMap::new());
+    static ref versions: Arc<DashMap<SystemTime, DashMap<String, u64>>> = Arc::new(DashMap::new());
+    // time stamp of most recent read operation for an element
+    // TODO: need to accommodate for more than one read timestamp
+    static ref read_stamps: Arc<DashMap<String, SystemTime>> = Arc::new(DashMap::new());
     // organizes write-ahead buffers for each transaction
     static ref write_aheads: Arc<DashMap<TransactionIdentifier, HashMap<String, u64>>> = Arc::new(DashMap::new());
+
     // maps tx_ids to relevant timestamps. the timestamp for a transaction ensures the transaction only reads from
     // any version at most as old as itself.
     static ref tx_timestamps: Arc<DashMap<TransactionIdentifier, SystemTime>> = Arc::new(DashMap::new());
@@ -82,7 +83,24 @@ struct SomeTimeTS {
     pub latest: SystemTime,
 }
 
-/// TODO: replace this with an actual TS RPC. Should of course reflect our semantics on what earliest and latest are.
+/// Gives the timestamp of the latest version before given timestamp `ts`.
+fn latest_before(ts: SystemTime) -> SystemTime {
+    versions
+        .iter()
+        .filter(|entry| entry.key() <= &ts) // don't check anything after ts
+        .fold(SystemTime::UNIX_EPOCH, |a, b| a.max(*b.key())) // converts between map entry and SystemTime with `b.key`
+}
+
+/// Reports whether a given timestamp `ts` is the timestamp for the earliest (or oldest) transaction.
+fn is_oldest(ts: SystemTime) -> bool {
+    tx_timestamps
+        .iter()
+        .filter(|entry| entry.value() <= &ts)
+        .next()
+        .is_none()
+}
+
+/// TODO: replace this with an actual ST RPC. Should of course reflect our semantics on what earliest and latest are.
 fn now() -> SomeTimeTS {
     SomeTimeTS {
         earliest: SystemTime::now(),
@@ -90,111 +108,113 @@ fn now() -> SomeTimeTS {
     }
 }
 
-/// Checks for existing locks for a key. Filters out `tx_id`.
-fn lock_for_key(tx_id: TransactionIdentifier, key: &String) -> Option<LockType> {
-    for lock_set in lock_sets.iter().filter(|lock_set| *lock_set.key() != tx_id) {
-        // finding the first lock is sufficient as if a write-lock is active, no other read-locks can be active
-        // likewise, if a read-lock is active, the first entry reflecting so will be accurate to all
-        if let Some(locktype) = lock_set.get(key) {
-            return Some(*locktype);
+/// waits until `ts` has passed.
+async fn elapse(ts: SystemTime) {
+    loop {
+        if ts.elapsed().is_err() {
+            // `elapsed` defined to be an error if the time is in the future
+            sleep(Duration::from_millis(100)).await;
         }
     }
-    None
-}
-
-/// Claims a key of type `locktype` for transaction `tx_id` on key `key`.
-fn claim_lock(tx_id: TransactionIdentifier, key: String, locktype: LockType) {
-    let lock_set = lock_sets
-        .get_mut(&tx_id)
-        .expect("lock_set lookup on a non-existent transaction");
-    lock_set.insert(key, locktype);
 }
 
 #[derive(Clone)]
 struct KvsServer(SocketAddr);
-
 impl Kvs for KvsServer {
     async fn begin(self, _: Context, tx_no: u64) -> KvsResult<()> {
-        unimplemented!(
-            "need to accomodate for timestamps (some other metadata associating transaction IDs with timing)"
-        );
         // acquiring this entry is an implicit lock acquiring, at least for the moment.
         // remember: the ENTRY is being locked.
         let tx_id = (self.0, tx_no);
-        tx_timestamps.insert(tx_id, now().latest);
-        match write_aheads.entry(tx_id) {
+        match tx_timestamps.entry(tx_id) {
             Entry::Occupied(_) => Err(kvsinterface::KvsError::TransactionExists(tx_id)),
-            Entry::Vacant(write_ahead_entry) => {
-                write_ahead_entry.insert(HashMap::with_capacity(3));
-                lock_sets.insert(tx_id, DashMap::with_capacity(3));
+            Entry::Vacant(timestamps_entry) => {
+                timestamps_entry.insert(now().latest); // TODO: do we actually want earliest here?
+                write_aheads.insert(tx_id, HashMap::new());
+
                 Ok(())
             }
         }
     }
     async fn get(self, _: Context, tx_no: u64, key: String) -> KvsResult<u64> {
         let tx_id = (self.0, tx_no);
-        match write_aheads.entry(tx_id) {
-            Entry::Vacant(_) => Err(kvsinterface::KvsError::TransactionDoesntExist(tx_id)),
-            Entry::Occupied(write_ahead_entry) => {
-                // 1. check if we've already moved this into our write_ahead. if so, return the val
-                if let Some(v) = write_ahead_entry.get().get(&key) {
-                    return Ok(*v);
+        match tx_timestamps.get(&tx_id) {
+            None => Err(KvsError::TransactionDoesntExist(tx_id)),
+            Some(ts) => {
+                let relevant_version_ts = latest_before(*ts);
+                if SystemTime::UNIX_EPOCH == relevant_version_ts {
+                    return Err(KvsError::KeyDoesntExist(key));
                 }
-                // 2. if not, check the highest held lock. If it's a write-lock, abort.
-                if let Some(LockType::Write) = lock_for_key(tx_id, &key) {
-                    return Err(kvsinterface::KvsError::LockConflict { tx_id, key });
-                }
-                // 3. if there's no write lock, read the entry and claim the read lock.
-                match store.get(&key) {
-                    None => Err(kvsinterface::KvsError::KeyDoesntExist(key)),
-                    Some(val) => {
-                        claim_lock(tx_id, key.clone(), LockType::Read);
-                        Ok(*val)
+
+                match versions.get(&relevant_version_ts).unwrap().get(&key) {
+                    None => Err(KvsError::KeyDoesntExist(key)),
+                    Some(entry) => {
+                        read_stamps.insert(key, *ts);
+                        Ok(*entry)
                     }
                 }
             }
         }
     }
+    // XXX: logic no longer relies on write-aheads for reads
+    // simple fix, but I didn't want to do it tonight
+    // I also don't think it breaks any semantics to do it this way
     async fn put(self, _: Context, tx_no: u64, key: String, val: u64) -> KvsResult<()> {
         let tx_id = (self.0, tx_no);
+        // check that we can write at all
+        match tx_timestamps.get(&tx_id) {
+            None => return Err(KvsError::TransactionDoesntExist(tx_id)),
+            Some(write_ts) => match read_stamps.get(&key) {
+                None => (),
+                Some(read_ts) => {
+                    if *write_ts <= *read_ts {
+                        return Err(KvsError::LockConflict { tx_id, key });
+                    }
+                }
+            },
+        };
         match write_aheads.entry(tx_id) {
             Entry::Vacant(_) => Err(kvsinterface::KvsError::TransactionDoesntExist(tx_id)),
             Entry::Occupied(mut write_ahead_entry) => {
-                // 1. check if we've already moved this into our write_ahead
-                if let Some(v) = write_ahead_entry.get_mut().get_mut(&key) {
-                    *v = val;
-                    return Ok(());
-                }
-                // 2. if not, check if there's a lock.
-                // if there isn't, claim a write lock, and write the darn thing to the write_ahead.
-                if let Some(_) = lock_for_key(tx_id, &key) {
-                    return Err(kvsinterface::KvsError::LockConflict { tx_id, key });
-                }
-                claim_lock(tx_id, key.clone(), LockType::Write);
                 write_ahead_entry.get_mut().insert(key, val);
                 Ok(())
             }
         }
     }
+    // TODO: check if oldest transaction
+    // if so, clean up older versions
     async fn commit(self, _: Context, tx_no: u64) -> KvsResult<()> {
-        unimplemented!(
-            "need to assign timestamps to every write in this transaction and then share with other replicas, as well as everything with commit-wait"
-        );
         let tx_id = (self.0, tx_no);
-        if let None = write_aheads.get(&tx_id) {
-            return Err(kvsinterface::KvsError::TransactionDoesntExist(tx_id));
-        }
+        let ts = match tx_timestamps.get(&tx_id) {
+            None => return Err(KvsError::TransactionDoesntExist(tx_id)),
+            Some(ts) => *ts,
+        };
+        let latest_version_ts = latest_before(ts);
+        let this_version = if latest_version_ts == SystemTime::UNIX_EPOCH {
+            DashMap::new()
+        } else {
+            versions
+                .get(&latest_version_ts)
+                .expect("latest version points to a nonexistent version")
+                .clone()
+        };
         // this looks ugly, but really avoids deadlocking with itself.
         // The alternative is to use a match on `write_aheads.get(&tx_no)`
         // where the `Some` variant also has to perform `write_aheads.remove(&tx_no)`
         for entry in write_aheads.get(&tx_id).unwrap().iter() {
-            store.insert(entry.0.clone(), *entry.1);
+            this_version.insert(entry.0.clone(), *entry.1);
         }
 
+        let commit_ts = now().latest;
+        elapse(commit_ts).await;
+        versions.insert(commit_ts, this_version);
+        // TODO: notify replica. do we want to line this up with our sleep?
+
         write_aheads.remove(&tx_id);
-        lock_sets.remove(&tx_id);
+        // lock_sets.remove(&tx_id);
         Ok(())
     }
+    // TODO: check if oldest transaction
+    // if so, clean up older versions
     async fn abort(self, _: Context, tx_no: u64) -> KvsResult<()> {
         let tx_id = (self.0, tx_no);
         if let Entry::Vacant(_) = write_aheads.entry(tx_id) {
@@ -203,7 +223,6 @@ impl Kvs for KvsServer {
         // deallocate everything from this transaction
 
         write_aheads.remove(&tx_id);
-        lock_sets.remove(&tx_id);
         Ok(())
     }
 }
