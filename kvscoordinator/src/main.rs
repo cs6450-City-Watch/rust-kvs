@@ -8,6 +8,8 @@ use std::{
 use tarpc::{client, context, tokio_serde::formats::Json};
 use tokio::time::sleep;
 
+use std::time::SystemTime;
+
 #[derive(Parser)]
 struct Flags {
     #[clap(long, short, default_value_t = String::from("node"), help = "Base of hostname on LAN for a server, e.g. the \"node\" in \"node0\"")]
@@ -33,6 +35,13 @@ struct Flags {
         help = "Ignores other configuration like server_base, num_servers, etc and only works over the loopback"
     )]
     localhost: bool,
+    #[clap(
+        long,
+        short,
+        default_value = None,
+        help = "Ignores other configuration and just directly connects to one IP address."
+    )]
+    ip_addr: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -87,24 +96,16 @@ impl KvsOperation {
     }
 }
 
-fn get_relevant_client(
-    clients: &Vec<KvsClient>,
-    num_servers: &u64,
-    op: &KvsOperation,
-) -> KvsClient {
+/// gets the index of the relevant client
+fn get_relevant_client(num_servers: &u64, op: &KvsOperation) -> usize {
     let mut s = DefaultHasher::new();
     op.hash(&mut s);
     let hash = s.finish();
     let idx = (hash % num_servers) as usize;
-    let client = clients[idx].clone();
-    client
+    idx
 }
 
-fn get_relevant_clients(
-    clients: &Vec<KvsClient>,
-    num_servers: &u64,
-    ops: &Vec<KvsOperation>,
-) -> Vec<KvsClient> {
+fn get_relevant_clients(num_servers: &u64, ops: &Vec<KvsOperation>) -> HashSet<usize> {
     // KvsClient does not impl Eq, so we need to work around it with indices into clients
     let mut relevant_client_idxs = HashSet::with_capacity(3);
 
@@ -116,11 +117,7 @@ fn get_relevant_clients(
         relevant_client_idxs.insert(idx);
     }
 
-
     relevant_client_idxs
-        .iter()
-        .map(|idx| clients[idx.to_owned()].clone())
-        .collect()
 }
 
 async fn run_transaction(
@@ -129,14 +126,16 @@ async fn run_transaction(
     tx_no: u64,
     ops: Vec<KvsOperation>,
 ) -> KvsResult<()> {
-    let relevant_clients = get_relevant_clients(clients, &num_servers, &ops);
-    for client in relevant_clients.clone().iter() {
-        KvsOperation::Begin.run(client, tx_no).await?;
+    let relevant_clients = get_relevant_clients(&num_servers, &ops);
+    for client_idx in relevant_clients.clone().iter() {
+        KvsOperation::Begin
+            .run(&clients[*client_idx], tx_no)
+            .await?;
     }
     let mut should_abort = false;
     for op in ops.iter() {
-        let client = get_relevant_client(clients, &num_servers, op);
-        let res = op.run(&client, tx_no).await;
+        let client_idx = get_relevant_client(&num_servers, op);
+        let res = op.run(&clients[client_idx], tx_no).await;
         println!("res: {:?}", res);
         if let Err(_) = res {
             should_abort = true;
@@ -150,9 +149,9 @@ async fn run_transaction(
         println!("committing");
         KvsOperation::Commit
     };
-    for client in relevant_clients.iter() {
+    for client_idx in relevant_clients.iter() {
         decision
-            .run(&client, tx_no)
+            .run(&clients[*client_idx], tx_no)
             .await
             .expect("txID validity should be checked by here");
     }
@@ -164,7 +163,16 @@ async fn run_transaction(
 async fn main() -> anyhow::Result<()> {
     let flags = Flags::parse();
 
-    let clients = if flags.localhost {
+    let clients = if let Some(addr) = flags.ip_addr {
+        println!("connecting to {}", addr);
+        let mut transport = tarpc::serde_transport::tcp::connect(
+            format!("{}:{}", addr, flags.port_no),
+            Json::default,
+        );
+        transport.config_mut().max_frame_length(usize::MAX);
+        vec![KvsClient::new(client::Config::default(), transport.await?).spawn()]
+    } else if flags.localhost {
+        println!("Connecting to localhost");
         let mut transport = tarpc::serde_transport::tcp::connect(
             format!("localhost:{}", flags.port_no),
             Json::default,
@@ -175,7 +183,10 @@ async fn main() -> anyhow::Result<()> {
     } else {
         let mut clients = Vec::with_capacity(3);
         for i in 0..flags.num_servers {
-            println!("connecting to: {}{}:{}", flags.server_base, i, flags.port_no);
+            println!(
+                "connecting to: {}{}:{}",
+                flags.server_base, i, flags.port_no
+            );
             let mut transport = tarpc::serde_transport::tcp::connect(
                 format!("{}{}:{}", flags.server_base, i, flags.port_no),
                 Json::default,
