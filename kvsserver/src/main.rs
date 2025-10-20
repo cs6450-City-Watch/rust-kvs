@@ -99,7 +99,7 @@ fn latest_before(ts: SystemTime) -> SystemTime {
 fn is_oldest(ts: SystemTime) -> bool {
     tx_timestamps
         .iter()
-        .filter(|entry| entry.value() <= &ts)
+        .filter(|entry| entry.value() < &ts)
         .next()
         .is_none()
 }
@@ -113,9 +113,9 @@ fn now() -> SomeTimeTS {
 }
 
 /// waits until `ts` has passed.
+/// From the spanner paper: waits until `now().earliest > commit_timestamp`
 async fn elapse(ts: SystemTime) {
-    while ts.elapsed().is_err() {
-        // `elapsed` defined to be an error if the time is in the future
+    while !(now().earliest > ts) {
         sleep(Duration::from_millis(100)).await;
     }
 }
@@ -123,6 +123,14 @@ async fn elapse(ts: SystemTime) {
 #[derive(Clone)]
 struct KvsServer(SocketAddr);
 impl Kvs for KvsServer {
+    /// Allocates all of the local information for this transaction.
+    /// The transaction is assigned a timestamp which is the "earliest" (`now().earliest`)
+    /// before this transaction.
+    ///
+    /// ## Relevant allocations
+    /// - timestamps entry (timestamp for the transaction)
+    /// - write-ahead buffer (intermediate storage prior to commit-time for writes)
+    /// - transaction read set (keys read by this transaction- makes it easier to manage dependencies)
     async fn begin(self, _: Context, tx_no: u64) -> KvsResult<()> {
         // acquiring this entry is an implicit lock acquiring, at least for the moment.
         // remember: the ENTRY is being locked.
@@ -139,6 +147,11 @@ impl Kvs for KvsServer {
             }
         }
     }
+    /// Algorithm is more or less as follows:
+    /// 1. Get the timestamp for the transaction (if it doesn't exist, error)
+    /// 2. Get the timestamp for the version to reference on read (if this is invalid, e.g. `UNIX_EPOCH`, error)
+    /// 3. from the version, read the value for the key (if key doesn't map to a value, error)
+    /// 4. mark the key as having been read and return the read value
     async fn get(self, _: Context, tx_no: u64, key: String) -> KvsResult<u64> {
         let tx_id = (self.0, tx_no);
         match tx_timestamps.get(&tx_id) {
@@ -159,9 +172,12 @@ impl Kvs for KvsServer {
             }
         }
     }
-    // XXX: logic no longer relies on write-aheads for reads
-    // simple fix, but I didn't want to do it tonight
-    // I also don't think it breaks any semantics to do it this way
+    /// Algorithm is more or less as follows:
+    /// 1. Get the transaction's timestamp (if not found, error)
+    /// 2. check the read timestamps.
+    ///   - if there exists a read timestamp that is further in the future than this transaction (a write), error
+    /// 3. mark value as read (effectively handles WAW dependencies)
+    /// 4. insert the written kv pair in the write-ahead buffer
     async fn put(self, _: Context, tx_no: u64, key: String, val: u64) -> KvsResult<()> {
         let tx_id = (self.0, tx_no);
         // check that we can write at all
@@ -172,6 +188,7 @@ impl Kvs for KvsServer {
         match read_stamps.get(&key) {
             None => (),
             Some(stamps) => {
+                // if there's a read timestamp further in the future than this transaction, error
                 if tx_ts
                     <= stamps
                         .iter()
@@ -182,7 +199,9 @@ impl Kvs for KvsServer {
             }
         }
         match write_aheads.entry(tx_id) {
-            Entry::Vacant(_) => Err(kvsinterface::KvsError::TransactionDoesntExist(tx_id)),
+            Entry::Vacant(_) => {
+                panic!("transaction exists with a valid timestamp but no valid write-ahead buffer")
+            }
             Entry::Occupied(mut write_ahead_entry) => {
                 mark_read(tx_id, tx_ts, key.to_owned());
                 write_ahead_entry.get_mut().insert(key, val);
@@ -190,9 +209,17 @@ impl Kvs for KvsServer {
             }
         }
     }
-    // invariant of ST timestamps monotonically increasing implies latest version -> version before now().earliest,
-    // then copy all writes over, wait until now().latest, and commit
+    /// Algorithm is more or less as follows:
+    /// 1. Get the transaction's timestamp (if not found, error)
+    /// 2. assign `time = ST.now()`
+    /// 3. get the latest version before `time.earliest` and clone it (if it doesn't exist, make a new version)
+    /// 4. copy every write from the write-ahead buffer into this cloned version
+    /// 5. wait until `time.latest`
+    /// 6. insert the version into readable versions (make visible, basically)
+    /// 7. deallocate resources for the transaction
     async fn commit(self, _: Context, tx_no: u64) -> KvsResult<()> {
+        // invariant of ST timestamps monotonically increasing implies latest version -> version before now().earliest,
+        // then copy all writes over, wait until now().latest, and commit
         let tx_id = (self.0, tx_no);
         let ts = match tx_timestamps.get(&tx_id) {
             None => return Err(KvsError::TransactionDoesntExist(tx_id)),
@@ -223,6 +250,7 @@ impl Kvs for KvsServer {
         deallocate_transaction(tx_id, ts);
         Ok(())
     }
+    /// Deallocates resources for an unsuccessful transaction.
     async fn abort(self, _: Context, tx_no: u64) -> KvsResult<()> {
         let tx_id = (self.0, tx_no);
         let ts = match tx_timestamps.get(&tx_id) {
