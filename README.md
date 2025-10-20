@@ -13,7 +13,7 @@ Again, like Spanner and TrueTime, SomeTime is used by this client
 by ensuring consistency in distributed transactions, globally ordering events,
 commit-wait logic, and applications with snapshots.
 
-### Commit-Wait (WIP ON THIS BRANCH)
+### Commit-Wait
 
 Transactions are committed with a timestamp using `tstamp = ST.Now().latest`.
 The commitment is actually performed once the timestamp for the commitment
@@ -27,12 +27,15 @@ also use the same commit timestamp. This ensures global consistency.
 
 Reads are only performed on data that has a timestamp earlier than `ST.Now().earliest`.
 
-### Ordering of Events (TODO)
+Transactions also give external consistency across replicas-
+commit operations depend on this consistency as part of commit-wait logic.
+
+### Ordering of Events
 
 Obviously, ordering of events kind of naturally falls out of using
 a "global clock" of sorts.
 
-### Snapshots (TODO)
+### Snapshots
 
 Snapshots are facilitated more or less with an MVCC approach.
 Transactions with different timestamps will get the data relevant to that timestamp.
