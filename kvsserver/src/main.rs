@@ -190,7 +190,7 @@ impl Kvs for KvsServer {
             Some(stamps) => {
                 // if there's a read timestamp further in the future than this transaction, error
                 if tx_ts
-                    <= stamps
+                    < stamps
                         .iter()
                         .fold(SystemTime::UNIX_EPOCH, |a, b| a.max(b.1))
                 {
