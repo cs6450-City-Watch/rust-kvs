@@ -10,6 +10,9 @@ use tokio::time::sleep;
 
 use std::time::SystemTime;
 
+mod txn_parser;
+use txn_parser::parse_transactions;
+
 #[derive(Parser)]
 struct Flags {
     #[clap(long, short, default_value_t = String::from("node"), help = "Base of hostname on LAN for a server, e.g. the \"node\" in \"node0\"")]
@@ -42,8 +45,8 @@ struct Flags {
         help = "Ignores other configuration and just directly connects to one IP address."
     )]
     ip_addr: Option<String>,
-    #[clap(long)]
-    key: String,
+    #[arg(help = "Path to file encoding operations.")]
+    file_path: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -143,8 +146,7 @@ async fn run_transaction(
         if let Err(_) = res {
             should_abort = true;
             break;
-        }
-        else if let Ok(Some(val)) = res {
+        } else if let Ok(Some(val)) = res {
             results.push(val);
         }
     }
@@ -205,24 +207,11 @@ async fn main() -> anyhow::Result<()> {
         clients
     };
 
-    for j in 1..100 {
-        println!("j: {}", j);
-        run_transaction(&clients, flags.num_servers, 0, vec![KvsOperation::Put(flags.key.clone(), 0)]).await?;
-        for i in 1..100 {
-            let reads = run_transaction(
-                &clients,
-                flags.num_servers,
-                i,
-                //0,
-                vec![
-                    // KvsOperation::Put("Hello".into(), i),
-                    KvsOperation::Get(flags.key.clone()),
-                    KvsOperation::Put(flags.key.clone(), i),
-                ],
-            )
-            .await?;
-            assert_eq!(reads[0], i-1);
-        }
+    let transactions = parse_transactions(flags.file_path);
+    let mut tx_no = 0;
+    for transaction in transactions.iter() {
+        run_transaction(&clients, flags.num_servers, tx_no, transaction.to_owned()).await?;
+        tx_no += 1;
     }
 
     // idk I think the example client does this for a reason though
