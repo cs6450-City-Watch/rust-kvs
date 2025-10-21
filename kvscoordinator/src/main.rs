@@ -42,6 +42,8 @@ struct Flags {
         help = "Ignores other configuration and just directly connects to one IP address."
     )]
     ip_addr: Option<String>,
+    #[clap(long)]
+    key: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -125,7 +127,8 @@ async fn run_transaction(
     num_servers: u64,
     tx_no: u64,
     ops: Vec<KvsOperation>,
-) -> KvsResult<()> {
+) -> KvsResult<Vec<u64>> {
+    let mut results = Vec::with_capacity(2);
     let relevant_clients = get_relevant_clients(&num_servers, &ops);
     for client_idx in relevant_clients.clone().iter() {
         KvsOperation::Begin
@@ -140,6 +143,9 @@ async fn run_transaction(
         if let Err(_) = res {
             should_abort = true;
             break;
+        }
+        else if let Ok(Some(val)) = res {
+            results.push(val);
         }
     }
     let decision = if should_abort {
@@ -156,7 +162,7 @@ async fn run_transaction(
             .expect("txID validity should be checked by here");
     }
 
-    Ok(())
+    Ok(results)
 }
 
 #[tokio::main]
@@ -199,22 +205,24 @@ async fn main() -> anyhow::Result<()> {
         clients
     };
 
-    for i in 0..100 {
-        run_transaction(
-            &clients,
-            flags.num_servers,
-            //i,
-            0,
-            vec![
-                // KvsOperation::Put("Hello".into(), i),
-                KvsOperation::Put("The quick brown fox jumped over the lazy gray dog".into(), i),
-                KvsOperation::Put("woke grok ruined my life".into(), i + 1),
-                KvsOperation::Put("".into(), i + 2),
-                KvsOperation::Put("aHR0cHM6Ly90ZW5vci5jb20vdmlldy9zaXhzZXZlbi1zaXgtc2V2ZW4tc2l4LXNldmUtNjctZ2lmLTE0MTQzMzM3NjY5MDMyOTU4MzQ5".into(), i+3),
-                KvsOperation::Put("694206741".into(), i+4),
-            ],
-        )
-        .await?;
+    for j in 1..100 {
+        println!("j: {}", j);
+        run_transaction(&clients, flags.num_servers, 0, vec![KvsOperation::Put(flags.key.clone(), 0)]).await?;
+        for i in 1..100 {
+            let reads = run_transaction(
+                &clients,
+                flags.num_servers,
+                i,
+                //0,
+                vec![
+                    // KvsOperation::Put("Hello".into(), i),
+                    KvsOperation::Get(flags.key.clone()),
+                    KvsOperation::Put(flags.key.clone(), i),
+                ],
+            )
+            .await?;
+            assert_eq!(reads[0], i-1);
+        }
     }
 
     // idk I think the example client does this for a reason though

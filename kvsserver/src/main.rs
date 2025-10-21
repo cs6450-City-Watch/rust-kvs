@@ -268,10 +268,10 @@ fn deallocate_transaction(tx_id: TransactionIdentifier, tx_ts: SystemTime) {
     // invariant: timestamps are monotonically increasing
     if is_oldest(tx_ts) {
         let mut prior_version = latest_before(tx_ts);
-        while prior_version != SystemTime::UNIX_EPOCH {
-            versions.remove(&prior_version);
-            prior_version = latest_before(tx_ts);
-        }
+        // while prior_version != SystemTime::UNIX_EPOCH {
+        versions.remove(&prior_version);
+        //     prior_version = latest_before(tx_ts);
+        // }
     }
 
     // deallocate write-ahead buffer
