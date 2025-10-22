@@ -12,6 +12,7 @@ use tarpc::{
     tokio_serde::formats::Json,
 };
 
+use tokio::sync::Mutex;
 use tokio::time::sleep;
 
 use std::collections::HashMap;
@@ -79,6 +80,7 @@ lazy_static! {
     // maps tx_ids to relevant timestamps. the timestamp for a transaction ensures the transaction only reads from
     // any version at most as old as itself.
     static ref tx_timestamps: Arc<DashMap<TransactionIdentifier, SystemTime>> = Arc::new(DashMap::new());
+    static ref latest_commit_lock: Arc<Mutex<()>> = Arc::new(Mutex::new(()));
 }
 
 #[derive(Copy, Clone)]
@@ -158,6 +160,13 @@ impl Kvs for KvsServer {
             None => Err(KvsError::TransactionDoesntExist(tx_id)),
             Some(ts) => {
                 let relevant_version_ts = latest_before(*ts);
+                /*
+                println!(
+                    "tx_id: {:?} GET REQUEST own ts: {:?} rvts: {:?}",
+                    tx_id, *ts, relevant_version_ts
+                );
+                println!("tx_id: {:?} versions: {:?}", tx_id, versions.len());
+                */
                 if SystemTime::UNIX_EPOCH == relevant_version_ts {
                     return Err(KvsError::KeyDoesntExist(key));
                 }
@@ -204,7 +213,8 @@ impl Kvs for KvsServer {
             }
             Entry::Occupied(mut write_ahead_entry) => {
                 mark_read(tx_id, tx_ts, key.to_owned());
-                write_ahead_entry.get_mut().insert(key, val);
+                write_ahead_entry.get_mut().insert(key.clone(), val);
+                //println!("tx_id: {:?} put {} into {}", tx_id, val, key);
                 Ok(())
             }
         }
@@ -225,26 +235,44 @@ impl Kvs for KvsServer {
             None => return Err(KvsError::TransactionDoesntExist(tx_id)),
             Some(ts) => *ts,
         };
-        let time = now();
-        let latest_version_ts = latest_before(time.earliest);
-        let this_version = if latest_version_ts == SystemTime::UNIX_EPOCH {
-            DashMap::new()
-        } else {
-            versions
-                .get(&latest_version_ts)
-                .expect("latest version points to a nonexistent version")
-                .clone()
-        };
-        // this looks ugly, but really avoids deadlocking with itself.
-        // The alternative is to use a match on `write_aheads.get(&tx_no)`
-        // where the `Some` variant also has to perform `write_aheads.remove(&tx_no)`
-        for entry in write_aheads.get(&tx_id).unwrap().iter() {
-            this_version.insert(entry.0.clone(), *entry.1);
-        }
+        let lock = Arc::clone(&latest_commit_lock);
+        {
+            let _guard = lock.lock().await;
+            let time = now();
+            let latest_version_ts = latest_before(time.earliest);
+            /*
+            println!(
+                "tx_id: {:?} got lock, time.earliest = {:?}, latest_version_ts = {:?}",
+                tx_id, time.earliest, latest_version_ts
+            );
+            */
+            let this_version = if latest_version_ts == SystemTime::UNIX_EPOCH {
+                DashMap::new()
+            } else {
+                versions
+                    .get(&latest_version_ts)
+                    .expect("latest version points to a nonexistent version")
+                    .clone()
+            };
+            // this looks ugly, but really avoids deadlocking with itself.
+            // The alternative is to use a match on `write_aheads.get(&tx_no)`
+            // where the `Some` variant also has to perform `write_aheads.remove(&tx_no)`
+            //println!("tx_id: {:?} (before) version: {:?}", tx_id, this_version);
+            for entry in write_aheads.get(&tx_id).unwrap().iter() {
+                this_version.insert(entry.0.clone(), *entry.1);
+            }
+            //println!("tx_id: {:?} (after) version: {:?}", tx_id, this_version);
 
-        // TODO: the order here seems a little fucky. revisit.
-        elapse(time.latest).await;
-        versions.insert(time.latest, this_version);
+            // TODO: the order here seems a little fucky. revisit.
+            elapse(time.latest).await;
+            versions.insert(time.latest, this_version);
+            /*
+            println!(
+                "tx_id: {:?} releasing lock, timestamp: {:?}",
+                tx_id, time.latest
+            );
+            */
+        }
         // TODO: notify replica. do we want to line this up with our sleep?
 
         deallocate_transaction(tx_id, ts);
@@ -266,12 +294,17 @@ impl Kvs for KvsServer {
 fn deallocate_transaction(tx_id: TransactionIdentifier, tx_ts: SystemTime) {
     // check if we also need to deallocate versions
     // invariant: timestamps are monotonically increasing
+
     if is_oldest(tx_ts) {
-        let mut prior_version = latest_before(tx_ts);
-        // while prior_version != SystemTime::UNIX_EPOCH {
-        versions.remove(&prior_version);
-        //     prior_version = latest_before(tx_ts);
-        // }
+        let prev_version = latest_before(tx_ts);
+        let removable_versions: Vec<SystemTime> = versions
+            .iter()
+            .map(|entry| entry.key().clone())
+            .filter(|ts| *ts < prev_version)
+            .collect();
+        for version_ts in removable_versions {
+            versions.remove(&version_ts);
+        }
     }
 
     // deallocate write-ahead buffer
