@@ -8,8 +8,6 @@ use std::{
 use tarpc::{client, context, tokio_serde::formats::Json};
 use tokio::time::sleep;
 
-use std::time::SystemTime;
-
 mod txn_parser;
 use txn_parser::parse_transactions;
 
