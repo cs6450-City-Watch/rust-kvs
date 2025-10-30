@@ -25,7 +25,11 @@ pub mod sometime {
     tonic::include_proto!("sometime");
 }
 
+use prost_types::Timestamp;
+use sometime::Interval;
 use sometime::some_time_client::SomeTimeClient;
+use sometime::some_time_server::{SomeTime, SomeTimeServer};
+use tonic::{Request, Response, Status, transport::Server};
 
 use kvsinterface::{Kvs, KvsError, KvsResult, TransactionIdentifier};
 
@@ -37,6 +41,8 @@ struct Flags {
     node_id: u16,
     #[clap(long, short, action)]
     localhost: bool,
+    #[clap(long, short)]
+    grpc_port: Option<u16>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -56,9 +62,25 @@ pub trait KvsReplica {
 #[derive(Clone)]
 struct KvsReplicator;
 
+#[derive(Default)]
+pub struct LocalTimeService;
+
 impl KvsReplica for KvsReplicator {
     async fn append_entries(self, _: Context, entries: Vec<TimeStampedEntry>) -> KvsResult<()> {
         unimplemented!()
+    }
+}
+
+#[tonic::async_trait]
+impl SomeTime for LocalTimeService {
+    async fn now(&self, _request: Request<Timestamp>) -> Result<Response<Interval>, Status> {
+        let current_time = now();
+
+        let earliest = Some(Timestamp::from(current_time.earliest));
+        let latest = Some(Timestamp::from(current_time.latest));
+
+        let interval = Interval { earliest, latest };
+        Ok(Response::new(interval))
     }
 }
 
@@ -356,6 +378,25 @@ async fn spawn(fut: impl Future<Output = ()> + Send + 'static) {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let flags = Flags::parse();
+
+    // Start gRPC server
+    let grpc_port = flags.grpc_port.unwrap_or(flags.port + 1000);
+    let grpc_addr = if flags.localhost {
+        format!("127.0.0.1:{}", grpc_port)
+    } else {
+        format!("0.0.0.0:{}", grpc_port)
+    };
+
+    println!("Starting gRPC server on: {}", grpc_addr);
+    let grpc_addr = grpc_addr.parse().unwrap();
+
+    tokio::spawn(async move {
+        Server::builder()
+            .add_service(SomeTimeServer::new(LocalTimeService::default()))
+            .serve(grpc_addr)
+            .await
+            .expect("gRPC server failed");
+    });
 
     let mut listener = if flags.localhost {
         let server_addr = ("localhost", flags.port);
