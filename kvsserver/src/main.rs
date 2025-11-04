@@ -1,17 +1,20 @@
+use std::time::SystemTime;
+
 use clap::Parser;
 use futures::{future, prelude::*};
 use kvsinterface::Kvs;
+use prost_types::Timestamp;
 use tarpc::{
     server::{self, Channel, incoming::Incoming},
     tokio_serde::formats::Json,
 };
-use tonic::transport::Server;
 
 mod grpc;
 mod kvs;
 mod storage;
 
-use grpc::{LocalTimeService, sometime::some_time_server::SomeTimeServer};
+use grpc::SomeTimeTS;
+use grpc::sometime::some_time_client::SomeTimeClient;
 use kvs::KvsServer;
 
 #[derive(Parser)]
@@ -22,37 +25,62 @@ struct Flags {
     node_id: u16,
     #[clap(long, short, action)]
     localhost: bool,
-    #[clap(long, short)]
-    grpc_port: Option<u16>,
+    #[clap(long, default_value_t = 50051)]
+    sometime_port: u16,
+    #[clap(long, default_value_t = 0)] // TODO change default value
+    sometime_node_id: u16,
 }
 
 async fn spawn(fut: impl Future<Output = ()> + Send + 'static) {
     tokio::spawn(fut);
 }
 
+// TODO: delete, fix now()
+async fn quick_test(mut client: SomeTimeClient<tonic::transport::Channel>) -> anyhow::Result<()> {
+    let request = tonic::Request::new(Timestamp::default());
+    let response = client.now(request).await?;
+    let response = response.into_inner();
+
+    let g_earliest: Timestamp = response.earliest.unwrap();
+    let g_latest: Timestamp = response.latest.unwrap();
+
+    let s_earliest: SystemTime = g_earliest
+        .try_into()
+        .expect("Failed to convert Timestamp to SystemTime");
+    let s_latest: SystemTime = g_latest
+        .try_into()
+        .expect("Failed to convert Timestamp to SystemTime");
+
+    let timestamp = SomeTimeTS {
+        earliest: s_earliest,
+        latest: s_latest,
+    };
+
+    println!("\nTimestamp requested");
+    println!("Earliest: {:?}", timestamp.earliest);
+    println!("Latest:   {:?}\n", timestamp.latest);
+
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let flags = Flags::parse();
 
-    // Start gRPC server
-    let grpc_port = flags.grpc_port.unwrap_or(flags.port + 1000);
-    let grpc_addr = if flags.localhost {
-        format!("127.0.0.1:{grpc_port}")
+    // Construct SomeTime service address
+    let sometime_addr = if flags.localhost {
+        "http://localhost:50051".to_string()
     } else {
-        format!("0.0.0.0:{grpc_port}")
+        format!(
+            "http://node{}:{}",
+            flags.sometime_node_id, flags.sometime_port
+        )
     };
 
-    println!("Starting gRPC server on: {grpc_addr}");
-    let grpc_addr = grpc_addr.parse().unwrap();
+    println!("connecting to SomeTime service at: {sometime_addr}");
+    let client = SomeTimeClient::connect(sometime_addr).await?;
 
-    tokio::spawn(async move {
-        Server::builder()
-            .add_service(SomeTimeServer::new(LocalTimeService))
-            .serve(grpc_addr)
-            .await
-            .expect("gRPC server failed");
-    });
-
+    quick_test(client).await?;
     let mut listener = if flags.localhost {
         let server_addr = ("localhost", flags.port);
         println!("listening on: {server_addr:?}");
