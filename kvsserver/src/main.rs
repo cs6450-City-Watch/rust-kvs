@@ -1,3 +1,9 @@
+//! KVS Server
+//!
+//! This program implements a distributed key-value store server that supports transactions
+//! with snapshot isolation. It integrates with the SomeTime service for distributed
+//! timestamp coordination and provides ACID guarantees for concurrent transactions.
+
 use std::time::SystemTime;
 
 use clap::Parser;
@@ -17,6 +23,7 @@ use grpc::SomeTimeTS;
 use grpc::sometime::some_time_client::SomeTimeClient;
 use kvs::KvsServer;
 
+/// Command-line arguments for the KVS server
 #[derive(Parser)]
 struct Flags {
     #[clap(long, short, default_value_t = 8080)]
@@ -31,11 +38,13 @@ struct Flags {
     sometime_node_id: u16,
 }
 
+/// Helper function to spawn a future on the tokio runtime.
 async fn spawn(fut: impl Future<Output = ()> + Send + 'static) {
     tokio::spawn(fut);
 }
 
-// TODO: delete, fix now()
+/// Test function to verify connectivity with the SomeTime service.
+/// TODO: This should be removed in production.
 async fn quick_test(mut client: SomeTimeClient<tonic::transport::Channel>) -> anyhow::Result<()> {
     let request = tonic::Request::new(Timestamp::default());
     let response = client.now(request).await?;
@@ -63,6 +72,10 @@ async fn quick_test(mut client: SomeTimeClient<tonic::transport::Channel>) -> an
     Ok(())
 }
 
+/// Main entry point for the KVS server.
+///
+/// Establishes connection with SomeTime service, sets up the TCP listener,
+/// and handles incoming client connections with transaction support.
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let flags = Flags::parse();

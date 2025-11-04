@@ -1,6 +1,9 @@
-// definitely could use better error handling but I couldn't be arsed
-//
-//
+//! Transaction parser module
+//!
+//! This module provides functionality to parse transaction specifications from text files.
+//! It supports a simple DSL for defining transactions with begin/end blocks containing
+//! get and put operations.
+
 use regex::Regex;
 use std::{fs, str::FromStr};
 
@@ -41,6 +44,7 @@ pub fn parse_transactions(file_path: String) -> Vec<Vec<KvsOperation>> {
 }
 
 /// Parses a single transaction starting with `begin` and ending with `end`.
+/// Returns None when there are no more transactions in the token stream.
 fn parse_single_transaction(tokens: &mut impl Iterator<Item = Token>) -> Option<Vec<KvsOperation>> {
     let mut transaction = Vec::new();
     match tokens.next() {
@@ -73,6 +77,7 @@ fn parse_single_transaction(tokens: &mut impl Iterator<Item = Token>) -> Option<
     (!transaction.is_empty()).then_some(transaction)
 }
 
+/// Consumes the next token and panics if it doesn't match the expected variant.
 fn expect_variant(tokens: &mut impl Iterator<Item = Token>, expected: Token) {
     let token = expect_token(tokens);
 
@@ -82,6 +87,7 @@ fn expect_variant(tokens: &mut impl Iterator<Item = Token>, expected: Token) {
     );
 }
 
+/// Consumes the next token and returns its string value, panicking if it's not a string token.
 fn expect_identifier(tokens: &mut impl Iterator<Item = Token>) -> String {
     let gotten_token = expect_token(tokens);
     match gotten_token {
@@ -94,6 +100,7 @@ fn expect_identifier(tokens: &mut impl Iterator<Item = Token>) -> String {
     }
 }
 
+/// Consumes the next token and returns its numeric value, panicking if it's not a constant token.
 fn expect_val(tokens: &mut impl Iterator<Item = Token>) -> u64 {
     let gotten_token = expect_token(tokens);
     match gotten_token {
@@ -106,10 +113,11 @@ fn expect_val(tokens: &mut impl Iterator<Item = Token>) -> u64 {
     }
 }
 
+/// Consumes the next token from the iterator, panicking if the stream is exhausted.
 fn expect_token(tokens: &mut impl Iterator<Item = Token>) -> Token {
     match tokens.next() {
         Some(token) => token,
-        None => panic!("severred stream"),
+        None => panic!("severed stream"),
     }
 }
 
@@ -122,6 +130,7 @@ lazy_static! {
         Regex::new(r"^(\(|\)|,)").expect("failure creating regex for single char tokens");
 }
 
+/// Represents the different types of tokens in the transaction specification language.
 #[derive(Debug, Clone, PartialEq)]
 enum Token {
     Begin,
@@ -131,12 +140,13 @@ enum Token {
     LParen,
     RParen,
     Comma,
-    Str(String),
-    Const(u64),
+    Str(String), // Key
+    Const(u64),  // Value
 }
 
 use thiserror::Error;
 
+/// Errors that can occur during lexical analysis of transaction specifications.
 #[derive(Error, Debug)]
 pub enum LexError {
     #[error("Unrecognized token (strang {strang:?})")]
@@ -161,6 +171,8 @@ impl FromStr for Token {
     }
 }
 
+/// Converts the input source string into a sequence of tokens.
+/// Uses regular expressions to identify keywords, identifiers, constants, and punctuation.
 fn tokenize(source: String) -> Vec<Token> {
     let mut strang = source.as_str().trim();
     let mut tokens = Vec::new();
