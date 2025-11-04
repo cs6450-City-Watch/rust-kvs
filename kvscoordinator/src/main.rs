@@ -60,7 +60,7 @@ impl Hash for KvsOperation {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         match self {
             Self::Begin | Self::Commit | Self::Abort => {
-                panic!("hash on invalid operation: {:?}", self)
+                panic!("hash on invalid operation: {self:?}")
             }
             Self::Get(key) | Self::Put(key, _) => key.hash(state),
         }
@@ -104,15 +104,14 @@ fn get_relevant_client(num_servers: &u64, op: &KvsOperation) -> usize {
     let mut s = DefaultHasher::new();
     op.hash(&mut s);
     let hash = s.finish();
-    let idx = (hash % num_servers) as usize;
-    idx
+    (hash % num_servers) as usize
 }
 
-fn get_relevant_clients(num_servers: &u64, ops: &Vec<KvsOperation>) -> HashSet<usize> {
+fn get_relevant_clients(num_servers: &u64, ops: &[KvsOperation]) -> HashSet<usize> {
     // KvsClient does not impl Eq, so we need to work around it with indices into clients
     let mut relevant_client_idxs = HashSet::with_capacity(3);
 
-    for op in ops.clone().iter() {
+    for op in ops.iter() {
         let mut s = DefaultHasher::new();
         op.hash(&mut s);
         let hash = s.finish();
@@ -124,7 +123,7 @@ fn get_relevant_clients(num_servers: &u64, ops: &Vec<KvsOperation>) -> HashSet<u
 }
 
 async fn run_transaction(
-    clients: &Vec<KvsClient>,
+    clients: &[KvsClient],
     num_servers: u64,
     tx_no: u64,
     ops: Vec<KvsOperation>,
@@ -140,8 +139,8 @@ async fn run_transaction(
     for op in ops.iter() {
         let client_idx = get_relevant_client(&num_servers, op);
         let res = op.run(&clients[client_idx], tx_no).await;
-        println!("res: {:?}", res);
-        if let Err(_) = res {
+        println!("res: {res:?}");
+        if res.is_err() {
             should_abort = true;
             break;
         } else if let Ok(Some(val)) = res {
@@ -170,7 +169,7 @@ async fn main() -> anyhow::Result<()> {
     let flags = Flags::parse();
 
     let clients = if let Some(addr) = flags.ip_addr {
-        println!("connecting to {}", addr);
+        println!("connecting to {addr}");
         let mut transport = tarpc::serde_transport::tcp::connect(
             format!("{}:{}", addr, flags.port_no),
             Json::default,
@@ -206,10 +205,14 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let transactions = parse_transactions(flags.file_path);
-    let mut tx_no = 0;
-    for transaction in transactions.iter() {
-        run_transaction(&clients, flags.num_servers, tx_no, transaction.to_owned()).await?;
-        tx_no += 1;
+    for (tx_no, transaction) in transactions.iter().enumerate() {
+        run_transaction(
+            &clients,
+            flags.num_servers,
+            tx_no.try_into().unwrap(),
+            transaction.to_owned(),
+        )
+        .await?;
     }
 
     // idk I think the example client does this for a reason though

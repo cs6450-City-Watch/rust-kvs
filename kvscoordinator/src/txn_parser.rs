@@ -66,23 +66,20 @@ fn parse_single_transaction(tokens: &mut impl Iterator<Item = Token>) -> Option<
                 expect_variant(tokens, Token::RParen);
                 transaction.push(KvsOperation::Get(id));
             }
-            _ => panic!("expected an operation token, got {:?}", gotten_token),
+            _ => panic!("expected an operation token, got {gotten_token:?}"),
         }
     }
 
-    if transaction.len() == 0 {
-        None
-    } else {
-        Some(transaction)
-    }
+    (!transaction.is_empty()).then_some(transaction)
 }
 
 fn expect_variant(tokens: &mut impl Iterator<Item = Token>, expected: Token) {
     let token = expect_token(tokens);
 
-    if token != expected {
-        panic!("expected token: {:?}, got token: {:?}", expected, token)
-    }
+    assert!(
+        token == expected,
+        "expected token: {expected:?}, got token: {token:?}"
+    );
 }
 
 fn expect_identifier(tokens: &mut impl Iterator<Item = Token>) -> String {
@@ -182,7 +179,7 @@ fn tokenize(source: String) -> Vec<Token> {
             strang = strang.trim_start_matches(mat.as_str());
             Token::from_str(mat.as_str()).unwrap()
         } else {
-            panic!("unrecognized: {}", strang);
+            panic!("unrecognized: {strang}");
         });
     }
 

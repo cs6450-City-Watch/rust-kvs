@@ -19,7 +19,7 @@ use crate::storage::{
 /// waits until `ts` has passed.
 /// From the spanner paper: waits until `now().earliest > commit_timestamp`
 pub async fn elapse(ts: SystemTime) {
-    while !(now().earliest > ts) {
+    while now().earliest <= ts {
         sleep(Duration::from_millis(100)).await;
     }
 }

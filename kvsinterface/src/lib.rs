@@ -20,17 +20,16 @@ impl Display for KvsError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::TransactionExists(tx_id) => {
-                write!(f, "Transaction with ID {:?} already exists", tx_id)
+                write!(f, "Transaction with ID {tx_id:?} already exists")
             }
             Self::TransactionDoesntExist(tx_id) => {
-                write!(f, "Transaction with ID {:?} doesn't exist", tx_id)
+                write!(f, "Transaction with ID {tx_id:?} doesn't exist")
             }
             Self::LockConflict { tx_id, key } => write!(
                 f,
-                "Transaction with ID {:?} operating on key {} hit a conflict",
-                tx_id, key
+                "Transaction with ID {tx_id:?} operating on key {key} hit a conflict"
             ),
-            Self::KeyDoesntExist(key) => write!(f, "Key {} does not exist", key),
+            Self::KeyDoesntExist(key) => write!(f, "Key {key} does not exist"),
         }
     }
 }

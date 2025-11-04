@@ -44,26 +44,15 @@ pub fn latest_before(ts: SystemTime) -> SystemTime {
 
 /// Reports whether a given timestamp `ts` is the timestamp for the earliest (or oldest) transaction.
 pub fn is_oldest(ts: SystemTime) -> bool {
-    TX_TIMESTAMPS
-        .iter()
-        .filter(|entry| entry.value() < &ts)
-        .next()
-        .is_none()
+    !TX_TIMESTAMPS.iter().any(|entry| entry.value() < &ts)
 }
 
 pub fn mark_read(tx_id: TransactionIdentifier, tx_ts: SystemTime, key: String) {
-    use dashmap::Entry;
-    // XXX: currently unsure of why dashmaps can be immutable on insert
-    match READ_STAMPS.entry(key.to_owned()) {
-        Entry::Vacant(entry) => {
-            let ds = DashSet::with_capacity(3);
-            ds.insert((tx_id, tx_ts));
-            entry.insert(ds);
-        }
-        Entry::Occupied(entry) => {
-            entry.get().insert((tx_id, tx_ts));
-        }
-    }
+    READ_STAMPS
+        .entry(key.to_owned())
+        .or_insert(DashSet::with_capacity(3))
+        .insert((tx_id, tx_ts));
+
     TRANSACTION_READS
         .get_mut(&tx_id)
         .expect("no transaction read buffer allocated for valid transaction ID")
@@ -78,7 +67,7 @@ pub fn deallocate_transaction(tx_id: TransactionIdentifier, tx_ts: SystemTime) {
         let prev_version = latest_before(tx_ts);
         let removable_versions: Vec<SystemTime> = VERSIONS
             .iter()
-            .map(|entry| entry.key().clone())
+            .map(|entry| *entry.key())
             .filter(|ts| *ts < prev_version)
             .collect();
         for version_ts in removable_versions {
@@ -97,10 +86,7 @@ pub fn deallocate_transaction(tx_id: TransactionIdentifier, tx_ts: SystemTime) {
     {
         READ_STAMPS
             .get_mut(&*read_key) // kind of ugly. First need to get the string, then need to borrow it.
-            .expect(&format!(
-                "read_stamps set for given key {} does not exist",
-                *read_key
-            ))
+            .unwrap_or_else(|| panic!("read_stamps set for given key {} does not exist", *read_key))
             .remove(&(tx_id, tx_ts));
     }
 
