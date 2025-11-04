@@ -1,3 +1,9 @@
+//! KVS service implementation
+//!
+//! This module implements the core KVS service logic with snapshot isolation,
+//! distributed timestamp management, and transaction coordination. It provides
+//! ACID properties for distributed transactions across multiple clients.
+
 use dashmap::Entry;
 use std::{
     collections::HashMap,
@@ -16,21 +22,24 @@ use crate::storage::{
     deallocate_transaction, latest_before, mark_read,
 };
 
-/// waits until `ts` has passed.
-/// From the spanner paper: waits until `now().earliest > commit_timestamp`
+/// Waits until the given timestamp has passed according to SomeTime semantics.
+/// From the Spanner paper: waits until `now().earliest > commit_timestamp`.
 pub async fn elapse(ts: SystemTime) {
     while now().earliest <= ts {
         sleep(Duration::from_millis(100)).await;
     }
 }
 
-// not at all fault-tolerant; still applicable since we're more just trying to get consistency across replicas
-// also like the Kvs service, it could be argued that this should be using tonic to not be stuck with rust
+/// Trait for KVS replication service.
+/// This would be used for maintaining consistency across replicas.
+/// Note: Not fault-tolerant; primarily for consistency demonstration.
 #[tarpc::service]
 pub trait KvsReplica {
+    /// Appends entries to the replica log for replication purposes.
     async fn append_entries(entries: Vec<TimeStampedEntry>) -> KvsResult<()>;
 }
 
+/// Replicator service implementation.
 #[derive(Clone)]
 pub struct KvsReplicator;
 
@@ -40,6 +49,8 @@ impl KvsReplica for KvsReplicator {
     }
 }
 
+/// Main KVS server implementation that handles distributed transactions.
+/// Each server instance is identified by its socket address.
 #[derive(Clone)]
 pub struct KvsServer(pub SocketAddr);
 
