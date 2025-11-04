@@ -26,6 +26,7 @@ pub mod sometime {
 }
 
 use sometime::some_time_client::SomeTimeClient;
+use prost_types::Timestamp;
 
 use kvsinterface::{Kvs, KvsError, KvsResult, TransactionIdentifier};
 
@@ -37,6 +38,10 @@ struct Flags {
     node_id: u16,
     #[clap(long, short, action)]
     localhost: bool,
+    #[clap(long, default_value_t = 50051)]
+    sometime_port: u16,
+    #[clap(long, default_value_t = 0)] // TODO change default value 
+    sometime_node_id: u16,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -81,6 +86,9 @@ lazy_static! {
     // any version at most as old as itself.
     static ref tx_timestamps: Arc<DashMap<TransactionIdentifier, SystemTime>> = Arc::new(DashMap::new());
     static ref latest_commit_lock: Arc<Mutex<()>> = Arc::new(Mutex::new(()));
+
+    // TODO: possible way to initialize a client 
+    //static ref SOMETIME_CLIENT: Arc<Mutex<Option<SomeTimeClient<tonic::transport::Channel>>>> = Arc::new(Mutex::new(None));
 }
 
 #[derive(Copy, Clone)]
@@ -353,9 +361,48 @@ async fn spawn(fut: impl Future<Output = ()> + Send + 'static) {
     tokio::spawn(fut);
 }
 
+// Connects server with the SomeTime service 
+async fn init_sometime_client(addr: String) -> anyhow::Result<SomeTimeClient<tonic::transport::Channel>> {
+    let client = SomeTimeClient::connect(addr).await?;
+
+    Ok(client)
+}
+
+// TODO: delete, fix now()
+async fn quick_test(mut client: SomeTimeClient<tonic::transport::Channel>) -> anyhow::Result<()> {
+     let response = client.now(()).await?;
+    let response = response.into_inner();
+
+    let g_earliest: Timestamp = response.earliest.unwrap();
+    let g_latest:   Timestamp = response.latest.unwrap();
+
+    let s_earliest: SystemTime = g_earliest.try_into().expect("Failed to convert Timestamp to SystemTime");
+    let s_latest:   SystemTime = g_latest.try_into().expect("Failed to convert Timestamp to SystemTime");
+    
+    let timestamp = SomeTimeTS{earliest: s_earliest, latest: s_latest};
+    
+    println!("\nTimestamp requested");
+    println!("Earliest: {:?}", timestamp.earliest);
+    println!("Latest:   {:?}\n", timestamp.latest);
+
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let flags = Flags::parse();
+
+    // Construct SomeTime service address 
+    let sometime_addr = if flags.localhost {
+        "http://localhost:50051".to_string()
+    } else {
+        format!("http://node{}:{}", flags.sometime_node_id, flags.sometime_port)
+    };
+
+    println!("connecting to SomeTime service at: {}", sometime_addr);
+    let client = init_sometime_client(sometime_addr).await?;
+
+    quick_test(client).await?;
 
     let mut listener = if flags.localhost {
         let server_addr = ("localhost", flags.port);
