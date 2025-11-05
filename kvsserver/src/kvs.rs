@@ -18,8 +18,8 @@ use kvsinterface::{Kvs, KvsError, KvsResult};
 
 use crate::grpc::now;
 use crate::storage::{
-    LATEST_COMMIT_LOCK, READ_STAMPS, TX_TIMESTAMPS, TimeStampedEntry, VERSIONS, WRITE_AHEADS,
-    deallocate_transaction, latest_before, mark_read,
+    TimeStampedEntry, deallocate_transaction, latest_before, latest_commit_lock, mark_read,
+    read_stamps, tx_timestamps, versions, write_aheads,
 };
 
 /// Waits until the given timestamp has passed according to SomeTime semantics.
@@ -67,13 +67,13 @@ impl Kvs for KvsServer {
         // acquiring this entry is an implicit lock acquiring, at least for the moment.
         // remember: the ENTRY is being locked.
         let tx_id = (self.0, tx_no);
-        match TX_TIMESTAMPS.entry(tx_id) {
+        match tx_timestamps.entry(tx_id) {
             Entry::Occupied(_) => Err(kvsinterface::KvsError::TransactionExists(tx_id)),
             Entry::Vacant(timestamps_entry) => {
                 // allocate resources to track transaction
                 timestamps_entry.insert(now().await.earliest); // TODO: do we want earliest or latest here?
-                WRITE_AHEADS.insert(tx_id, HashMap::new());
-                crate::storage::TRANSACTION_READS.insert(tx_id, dashmap::DashSet::new());
+                write_aheads.insert(tx_id, HashMap::new());
+                crate::storage::transaction_reads.insert(tx_id, dashmap::DashSet::new());
 
                 Ok(())
             }
@@ -87,7 +87,7 @@ impl Kvs for KvsServer {
     /// 4. mark the key as having been read and return the read value
     async fn get(self, _: Context, tx_no: u64, key: String) -> KvsResult<u64> {
         let tx_id = (self.0, tx_no);
-        match TX_TIMESTAMPS.get(&tx_id) {
+        match tx_timestamps.get(&tx_id) {
             None => Err(KvsError::TransactionDoesntExist(tx_id)),
             Some(ts) => {
                 let relevant_version_ts = latest_before(*ts);
@@ -102,7 +102,7 @@ impl Kvs for KvsServer {
                     return Err(KvsError::KeyDoesntExist(key));
                 }
 
-                match VERSIONS.get(&relevant_version_ts).unwrap().get(&key) {
+                match versions.get(&relevant_version_ts).unwrap().get(&key) {
                     None => Err(KvsError::KeyDoesntExist(key)),
                     Some(entry) => {
                         mark_read(tx_id, *ts, key);
@@ -122,11 +122,11 @@ impl Kvs for KvsServer {
     async fn put(self, _: Context, tx_no: u64, key: String, val: u64) -> KvsResult<()> {
         let tx_id = (self.0, tx_no);
         // check that we can write at all
-        let tx_ts = match TX_TIMESTAMPS.get(&tx_id) {
+        let tx_ts = match tx_timestamps.get(&tx_id) {
             None => return Err(KvsError::TransactionDoesntExist(tx_id)),
             Some(write_ts) => *write_ts,
         };
-        match READ_STAMPS.get(&key) {
+        match read_stamps.get(&key) {
             None => (),
             Some(stamps) => {
                 // if there's a read timestamp further in the future than this transaction, error
@@ -139,7 +139,7 @@ impl Kvs for KvsServer {
                 }
             }
         }
-        match WRITE_AHEADS.entry(tx_id) {
+        match write_aheads.entry(tx_id) {
             Entry::Vacant(_) => {
                 panic!("transaction exists with a valid timestamp but no valid write-ahead buffer")
             }
@@ -164,11 +164,11 @@ impl Kvs for KvsServer {
         // invariant of ST timestamps monotonically increasing implies latest version -> version before now().earliest,
         // then copy all writes over, wait until now().latest, and commit
         let tx_id = (self.0, tx_no);
-        let ts = match TX_TIMESTAMPS.get(&tx_id) {
+        let ts = match tx_timestamps.get(&tx_id) {
             None => return Err(KvsError::TransactionDoesntExist(tx_id)),
             Some(ts) => *ts,
         };
-        let lock = Arc::clone(&LATEST_COMMIT_LOCK);
+        let lock = Arc::clone(&latest_commit_lock);
         {
             let _guard = lock.lock().await;
             let time = now().await;
@@ -176,7 +176,7 @@ impl Kvs for KvsServer {
             let this_version = if latest_version_ts == SystemTime::UNIX_EPOCH {
                 dashmap::DashMap::new()
             } else {
-                VERSIONS
+                versions
                     .get(&latest_version_ts)
                     .expect("latest version points to a nonexistent version")
                     .clone()
@@ -185,14 +185,14 @@ impl Kvs for KvsServer {
             // The alternative is to use a match on `write_aheads.get(&tx_no)`
             // where the `Some` variant also has to perform `write_aheads.remove(&tx_no)`
             //println!("tx_id: {:?} (before) version: {:?}", tx_id, this_version);
-            for entry in WRITE_AHEADS.get(&tx_id).unwrap().iter() {
+            for entry in write_aheads.get(&tx_id).unwrap().iter() {
                 this_version.insert(entry.0.clone(), *entry.1);
             }
             //println!("tx_id: {:?} (after) version: {:?}", tx_id, this_version);
 
             // TODO: the order here seems a little fucky. revisit.
             elapse(time.latest).await;
-            VERSIONS.insert(time.latest, this_version);
+            versions.insert(time.latest, this_version);
             /*
             println!(
                 "tx_id: {:?} releasing lock, timestamp: {:?}",
@@ -209,7 +209,7 @@ impl Kvs for KvsServer {
     /// Deallocates resources for an unsuccessful transaction.
     async fn abort(self, _: Context, tx_no: u64) -> KvsResult<()> {
         let tx_id = (self.0, tx_no);
-        let ts = match TX_TIMESTAMPS.get(&tx_id) {
+        let ts = match tx_timestamps.get(&tx_id) {
             None => return Err(KvsError::TransactionDoesntExist(tx_id)),
             Some(ts) => *ts,
         };
