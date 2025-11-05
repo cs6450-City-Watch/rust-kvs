@@ -29,18 +29,18 @@ Start multiple server instances across your cluster:
 
 ```bash
 # Node 0
-[kvsserver]$ cargo run -- --node-id 0 --port 8080
+[kvsserver]$ cargo run -- --listen-on node0:8080
 
 # Node 1  
-[kvsserver]$ cargo run -- --node-id 1 --port 8080
+[kvsserver]$ cargo run -- --listen-on node1:8080
 
 # Node 2
-[kvsserver]$ cargo run -- --node-id 2 --port 8080
+[kvsserver]$ cargo run -- --listen-on node2:8080
 ```
 
 For local testing:
 ```bash
-[kvsserver]$ cargo run --bin kvsserver -- --localhost --port 8080
+[kvsserver]$ cargo run -- --listen-on localhost:8080
 ```
 
 ### Running Transactions
@@ -105,12 +105,9 @@ Options:
 Usage: kvsserver [OPTIONS]
 
 Options:
-  -p, --port <PORT>                          [default: 8080]
-  -n, --node-id <NODE_ID>                    [default: 0]
-  -l, --localhost
-      --sometime-port <SOMETIME_PORT>        [default: 50051]
-      --sometime-node-id <SOMETIME_NODE_ID>  [default: 0]
-  -h, --help                                 Print help
+  -l, --listen-on <LISTEN_ON>          The address for this KVS server to listen on [default: localhost:8080]
+  -s, --sometime-host <SOMETIME_HOST>  The address the SomeTime server is listening on [default: localhost:50051]
+  -h, --help                           Print help (see more with '--help')
 ```
 
 ## Prerequisites

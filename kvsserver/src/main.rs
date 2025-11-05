@@ -4,12 +4,11 @@
 //! with snapshot isolation. It integrates with the SomeTime service for distributed
 //! timestamp coordination and provides ACID guarantees for concurrent transactions.
 
-use std::time::SystemTime;
+use std::{fmt::Display, str::FromStr};
 
 use clap::Parser;
 use futures::{future, prelude::*};
 use kvsinterface::Kvs;
-use prost_types::Timestamp;
 use tarpc::{
     server::{self, Channel, incoming::Incoming},
     tokio_serde::formats::Json,
@@ -19,57 +18,55 @@ mod grpc;
 mod kvs;
 mod storage;
 
-use grpc::SomeTimeTS;
-use grpc::sometime::some_time_client::SomeTimeClient;
 use kvs::KvsServer;
+
+#[derive(Clone)]
+struct Address<const DEFAULT_PORT: u16>(String, u16);
+
+impl<const DEFAULT_PORT: u16> Display for Address<DEFAULT_PORT> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}", self.0, self.1)
+    }
+}
+
+impl<const DEFAULT_PORT: u16> FromStr for Address<DEFAULT_PORT> {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if let Some(stripped) = s.strip_prefix(':') {
+            // Port only (e.g., ":8080")
+            let port = stripped.parse().map_err(|_| "Invalid port")?;
+            Ok(Address(String::new(), port))
+        } else if let Some((host, port)) = s.rsplit_once(':') {
+            // Host and port (e.g., "localhost:8080")
+            let port = port.parse().map_err(|_| "Invalid port")?;
+            Ok(Address(host.to_string(), port))
+        } else {
+            // Host only (e.g., "localhost")
+            Ok(Address(s.to_string(), DEFAULT_PORT))
+        }
+    }
+}
 
 /// Command-line arguments for the KVS server
 #[derive(Parser)]
 struct Flags {
-    #[clap(long, short, default_value_t = 8080)]
-    port: u16,
-    #[clap(long, short, default_value_t = 0)]
-    node_id: u16,
-    #[clap(long, short, action)]
-    localhost: bool,
-    #[clap(long, default_value_t = 50051)]
-    sometime_port: u16,
-    #[clap(long, default_value_t = 0)] // TODO change default value
-    sometime_node_id: u16,
+    /// The address for this KVS server to listen on
+    ///
+    /// Include the hostname/IP and/or port as needed
+    #[clap(long, short, default_value_t = Address("localhost".into(), 8080))]
+    listen_on: Address<8080>,
+
+    /// The address the SomeTime server is listening on
+    ///
+    /// Include the hostname/IP and/or port as needed
+    #[clap(long, short, default_value_t = Address("localhost".into(), 50051))]
+    sometime_host: Address<50051>,
 }
 
 /// Helper function to spawn a future on the tokio runtime.
 async fn spawn(fut: impl Future<Output = ()> + Send + 'static) {
     tokio::spawn(fut);
-}
-
-/// Test function to verify connectivity with the SomeTime service.
-/// TODO: This should be removed in production.
-async fn quick_test(mut client: SomeTimeClient<tonic::transport::Channel>) -> anyhow::Result<()> {
-    let request = tonic::Request::new(Timestamp::default());
-    let response = client.now(request).await?;
-    let response = response.into_inner();
-
-    let g_earliest: Timestamp = response.earliest.unwrap();
-    let g_latest: Timestamp = response.latest.unwrap();
-
-    let s_earliest: SystemTime = g_earliest
-        .try_into()
-        .expect("Failed to convert Timestamp to SystemTime");
-    let s_latest: SystemTime = g_latest
-        .try_into()
-        .expect("Failed to convert Timestamp to SystemTime");
-
-    let timestamp = SomeTimeTS {
-        earliest: s_earliest,
-        latest: s_latest,
-    };
-
-    println!("\nTimestamp requested");
-    println!("Earliest: {:?}", timestamp.earliest);
-    println!("Latest:   {:?}\n", timestamp.latest);
-
-    Ok(())
 }
 
 /// Main entry point for the KVS server.
@@ -80,29 +77,13 @@ async fn quick_test(mut client: SomeTimeClient<tonic::transport::Channel>) -> an
 async fn main() -> anyhow::Result<()> {
     let flags = Flags::parse();
 
-    // Construct SomeTime service address
-    let sometime_addr = if flags.localhost {
-        "http://localhost:50051".to_string()
-    } else {
-        format!(
-            "http://node{}:{}",
-            flags.sometime_node_id, flags.sometime_port
-        )
-    };
+    let sometime_addr = format!("http://{}", flags.sometime_host);
 
     println!("connecting to SomeTime service at: {sometime_addr}");
-    let client = SomeTimeClient::connect(sometime_addr).await?;
 
-    quick_test(client).await?;
-    let mut listener = if flags.localhost {
-        let server_addr = ("localhost", flags.port);
-        println!("listening on: {server_addr:?}");
-        tarpc::serde_transport::tcp::listen(&server_addr, Json::default).await?
-    } else {
-        let server_addr = (format!("node{}", flags.node_id), flags.port);
-        println!("listening on: {server_addr:?}");
-        tarpc::serde_transport::tcp::listen(&server_addr, Json::default).await?
-    };
+    let server_addr = (flags.listen_on.0, flags.listen_on.1);
+    println!("listening on: {}:{}", server_addr.0, server_addr.1);
+    let mut listener = tarpc::serde_transport::tcp::listen(&server_addr, Json::default).await?;
 
     listener.config_mut().max_frame_length(usize::MAX);
     listener
