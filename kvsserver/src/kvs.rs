@@ -25,7 +25,7 @@ use crate::storage::{
 /// Waits until the given timestamp has passed according to SomeTime semantics.
 /// From the Spanner paper: waits until `now().earliest > commit_timestamp`.
 pub async fn elapse(ts: SystemTime) {
-    while now().earliest <= ts {
+    while now().await.earliest <= ts {
         sleep(Duration::from_millis(100)).await;
     }
 }
@@ -71,7 +71,7 @@ impl Kvs for KvsServer {
             Entry::Occupied(_) => Err(kvsinterface::KvsError::TransactionExists(tx_id)),
             Entry::Vacant(timestamps_entry) => {
                 // allocate resources to track transaction
-                timestamps_entry.insert(now().earliest); // TODO: do we want earliest or latest here?
+                timestamps_entry.insert(now().await.earliest); // TODO: do we want earliest or latest here?
                 WRITE_AHEADS.insert(tx_id, HashMap::new());
                 crate::storage::TRANSACTION_READS.insert(tx_id, dashmap::DashSet::new());
 
@@ -171,14 +171,8 @@ impl Kvs for KvsServer {
         let lock = Arc::clone(&LATEST_COMMIT_LOCK);
         {
             let _guard = lock.lock().await;
-            let time = now();
+            let time = now().await;
             let latest_version_ts = latest_before(time.earliest);
-            /*
-            println!(
-                "tx_id: {:?} got lock, time.earliest = {:?}, latest_version_ts = {:?}",
-                tx_id, time.earliest, latest_version_ts
-            );
-            */
             let this_version = if latest_version_ts == SystemTime::UNIX_EPOCH {
                 dashmap::DashMap::new()
             } else {
