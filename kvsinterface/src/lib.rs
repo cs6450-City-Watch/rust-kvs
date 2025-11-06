@@ -37,6 +37,8 @@ impl Display for KvsError {
 
 pub type KvsResult<T> = Result<T, KvsError>;
 
+// current idea is that the KVS interface to the coordinator/client should not change
+// rather the server itself should manage its own timestamps
 #[tarpc::service]
 pub trait Kvs {
     async fn begin(tx_no: u64) -> KvsResult<()>;
