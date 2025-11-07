@@ -50,8 +50,7 @@ pub struct SomeTimeTS {
 pub async fn now() -> SomeTimeTS {
     match get_sometime_client().await {
         Ok(client) => {
-            let request = Request::new(Timestamp::from(SystemTime::now()));
-            match client.clone().now(request).await {
+            match client.clone().now(()).await {
                 Ok(response) => {
                     let interval = response.into_inner();
 
@@ -80,6 +79,8 @@ pub async fn now() -> SomeTimeTS {
         }
         Err(_) => {
             // Fall back to local time with default uncertainty
+            // println!("Failed to reach SomeTime service. Make sure SomeTime is running. Falling back to default uncertainty");
+
             let current_time = SystemTime::now();
             SomeTimeTS {
                 earliest: current_time,
@@ -96,7 +97,7 @@ pub struct LocalTimeService;
 #[tonic::async_trait]
 impl SomeTime for LocalTimeService {
     /// Returns the current timestamp as a SomeTime interval.
-    async fn now(&self, _request: Request<Timestamp>) -> Result<Response<Interval>, Status> {
+    async fn now(&self, _request: Request<()>) -> Result<Response<Interval>, Status> {
         let current_time = now().await;
 
         let earliest = Some(Timestamp::from(current_time.earliest));
