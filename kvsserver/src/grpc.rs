@@ -18,6 +18,8 @@ use sometime::some_time_client::SomeTimeClient;
 use sometime::some_time_server::SomeTime;
 
 /// Cached client connection to the SomeTime service
+/// `Channel`s are ultimately `tower::Buffer`s,
+/// which can be safely cloned and shared without additional overhead.
 static SOMETIME_CLIENT: OnceLock<SomeTimeClient<Channel>> = OnceLock::new();
 
 /// Gets or creates a connection to the SomeTime service
@@ -50,6 +52,7 @@ pub struct SomeTimeTS {
 pub async fn now() -> SomeTimeTS {
     match get_sometime_client().await {
         Ok(client) => {
+            // see `SOMETIME_CLIENT` doc comment.
             match client.clone().now(()).await {
                 Ok(response) => {
                     let interval = response.into_inner();
@@ -58,12 +61,12 @@ pub async fn now() -> SomeTimeTS {
                     let earliest = interval
                         .earliest
                         .and_then(|ts| SystemTime::try_from(ts).ok())
-                        .unwrap_or_else(SystemTime::now);
+                        .unwrap_or(SystemTime::now());
 
                     let latest = interval
                         .latest
                         .and_then(|ts| SystemTime::try_from(ts).ok())
-                        .unwrap_or_else(|| earliest + std::time::Duration::from_secs(1));
+                        .unwrap_or(earliest + std::time::Duration::from_secs(1)); // default uncertainty on error cases
 
                     SomeTimeTS { earliest, latest }
                 }

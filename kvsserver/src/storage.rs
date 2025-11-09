@@ -24,10 +24,6 @@ pub struct TimeStampedEntry {
 }
 
 lazy_static! {
-    /// The main store for this node's portion of the distributed KVS.
-    /// TODO: Probably unnecessary with versioned storage.
-    pub static ref store: Arc<DashMap<String, u64>> = Arc::new(DashMap::new());
-
     /// Timestamped versions of the store for snapshot isolation.
     /// Maps commit timestamps to the state of the store at that time.
     pub static ref versions: Arc<DashMap<SystemTime, DashMap<String, u64>>> = Arc::new(DashMap::new());
