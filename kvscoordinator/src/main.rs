@@ -1,3 +1,9 @@
+//! KVS Coordinator
+//!
+//! This program implements a coordinator service that orchestrates distributed transactions
+//! across multiple KVS servers. It reads transaction specifications from files and
+//! coordinates their execution using the two-phase commit protocol.
+
 use clap::Parser;
 use kvsinterface::{KvsClient, KvsResult};
 use std::{
@@ -11,6 +17,7 @@ use tokio::time::sleep;
 mod txn_parser;
 use txn_parser::parse_transactions;
 
+/// Command-line arguments for the KVS coordinator
 #[derive(Parser)]
 struct Flags {
     #[clap(long, short, default_value_t = String::from("node"), help = "Base of hostname on LAN for a server, e.g. the \"node\" in \"node0\"")]
@@ -47,12 +54,18 @@ struct Flags {
     file_path: String,
 }
 
+/// Represents the different operations that can be performed in a KVS transaction
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum KvsOperation {
+    /// Start a new transaction
     Begin,
+    /// Read the value for a given key
     Get(String),
+    /// Write a value to a given key
     Put(String, u64),
+    /// Commit the current transaction
     Commit,
+    /// Abort the current transaction
     Abort,
 }
 
@@ -60,7 +73,7 @@ impl Hash for KvsOperation {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         match self {
             Self::Begin | Self::Commit | Self::Abort => {
-                panic!("hash on invalid operation: {:?}", self)
+                panic!("hash on invalid operation: {self:?}")
             }
             Self::Get(key) | Self::Put(key, _) => key.hash(state),
         }
@@ -68,6 +81,8 @@ impl Hash for KvsOperation {
 }
 
 impl KvsOperation {
+    /// Executes this operation on the given client with the specified transaction number.
+    /// Returns an optional value for Get operations, None for other operations.
     async fn run(&self, client: &KvsClient, tx_no: u64) -> KvsResult<Option<u64>> {
         loop {
             if let Self::Get(key) = self {
@@ -99,20 +114,22 @@ impl KvsOperation {
     }
 }
 
-/// gets the index of the relevant client
+/// Gets the index of the relevant client for a given operation using consistent hashing.
+/// Operations on the same key will always be routed to the same server.
 fn get_relevant_client(num_servers: &u64, op: &KvsOperation) -> usize {
     let mut s = DefaultHasher::new();
     op.hash(&mut s);
     let hash = s.finish();
-    let idx = (hash % num_servers) as usize;
-    idx
+    (hash % num_servers) as usize
 }
 
-fn get_relevant_clients(num_servers: &u64, ops: &Vec<KvsOperation>) -> HashSet<usize> {
+/// Gets the set of all relevant client indices for a transaction's operations.
+/// This determines which servers need to participate in the transaction.
+fn get_relevant_clients(num_servers: &u64, ops: &[KvsOperation]) -> HashSet<usize> {
     // KvsClient does not impl Eq, so we need to work around it with indices into clients
     let mut relevant_client_idxs = HashSet::with_capacity(3);
 
-    for op in ops.clone().iter() {
+    for op in ops.iter() {
         let mut s = DefaultHasher::new();
         op.hash(&mut s);
         let hash = s.finish();
@@ -123,8 +140,16 @@ fn get_relevant_clients(num_servers: &u64, ops: &Vec<KvsOperation>) -> HashSet<u
     relevant_client_idxs
 }
 
+/// Executes a single transaction using the two-phase commit protocol.
+///
+/// This function coordinates the execution of a transaction across multiple servers:
+/// 1. Begins the transaction on all relevant servers
+/// 2. Executes operations in sequence
+/// 3. Commits or aborts based on operation success
+///
+/// Returns a vector of values read during the transaction.
 async fn run_transaction(
-    clients: &Vec<KvsClient>,
+    clients: &[KvsClient],
     num_servers: u64,
     tx_no: u64,
     ops: Vec<KvsOperation>,
@@ -140,8 +165,8 @@ async fn run_transaction(
     for op in ops.iter() {
         let client_idx = get_relevant_client(&num_servers, op);
         let res = op.run(&clients[client_idx], tx_no).await;
-        println!("res: {:?}", res);
-        if let Err(_) = res {
+        println!("res: {res:?}");
+        if res.is_err() {
             should_abort = true;
             break;
         } else if let Ok(Some(val)) = res {
@@ -165,12 +190,16 @@ async fn run_transaction(
     Ok(results)
 }
 
+/// Main entry point for the KVS coordinator.
+///
+/// Parses command-line arguments, establishes connections to KVS servers,
+/// reads transaction specifications from a file, and executes them in sequence.
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let flags = Flags::parse();
 
     let clients = if let Some(addr) = flags.ip_addr {
-        println!("connecting to {}", addr);
+        println!("connecting to {addr}");
         let mut transport = tarpc::serde_transport::tcp::connect(
             format!("{}:{}", addr, flags.port_no),
             Json::default,
@@ -206,10 +235,14 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let transactions = parse_transactions(flags.file_path);
-    let mut tx_no = 0;
-    for transaction in transactions.iter() {
-        run_transaction(&clients, flags.num_servers, tx_no, transaction.to_owned()).await?;
-        tx_no += 1;
+    for (tx_no, transaction) in transactions.iter().enumerate() {
+        run_transaction(
+            &clients,
+            flags.num_servers,
+            tx_no.try_into().unwrap(),
+            transaction.to_owned(),
+        )
+        .await?;
     }
 
     // idk I think the example client does this for a reason though

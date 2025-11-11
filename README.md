@@ -1,52 +1,90 @@
 # Rusty KVS with SomeTime
 
-SomeTime API works regardless of asynch/synch deployment of SomeTime.
+A distributed, transactional key-value store implementation in Rust that leverages the SomeTime timestamp service for consistent distributed transactions.
+The SomeTime API works regardless of asynch/synch deployment of SomeTime.
 In general, it works like how TrueTime works with Spanner.
 
-This KVS is, of course, a sharded and replicated KVS that spans multiple machines.
-Using the CloudLab facilities across the US, we've also been able
-to confirm that this works with minimal overhead regarding typical operations.
+This KVS is sharded and replicated across multiple machines.
+Using the CloudLab facilities across the US, we've also been able to confirm that this works with minimal overhead regarding typical operations.
 
-## SomeTime usage in our project
+## Architecture
 
-Again, like Spanner and TrueTime, SomeTime is used by this client
-by ensuring consistency in distributed transactions, globally ordering events,
-commit-wait logic, and applications with snapshots.
+The system consists of three main components:
 
-### Commit-Wait
+1. **KVS Interface (`kvsinterface`)**:
+  Common library defining the RPC interface and data structures used across the system.
 
-Transactions are committed with a timestamp using `tstamp = ST.Now().latest`.
-The commitment is actually performed once the timestamp for the commitment
-is in the past, i.e. `tstamp <= ST.Now().earliest`.
+2. **KVS Server (`kvsserver`)**:
+  The distributed storage nodes that handle data storage and transaction processing.
+  Integrates with SomeTime for distributed timestamp coordination for consistency.
 
-### Consistency in Transactions (TODO)
+3. **KVS Coordinator (`kvscoordinator`)**
+  Transaction coordinator that orchestrates distributed transactions.
 
-Again, using the commit timestamp, a reasonable client (e.g. our rusty KVS)
-will ensure that other replicas participating in the transaction
-also use the same commit timestamp. This ensures global consistency.
+## Usage
 
-Reads are only performed on data that has a timestamp earlier than `ST.Now().earliest`.
+### Starting KVS Servers
 
-Transactions also give external consistency across replicas-
-commit operations depend on this consistency as part of commit-wait logic.
+Start multiple server instances across your cluster:
 
-### Ordering of Events
+```bash
+# Node 0
+[kvsserver]$ cargo run -- --listen-on node0:8080
 
-Obviously, ordering of events kind of naturally falls out of using
-a "global clock" of sorts.
+# Node 1  
+[kvsserver]$ cargo run -- --listen-on node1:8080
 
-### Snapshots
+# Node 2
+[kvsserver]$ cargo run -- --listen-on node2:8080
+```
 
-Snapshots are facilitated more or less with an MVCC approach.
-Transactions with different timestamps will get the data relevant to that timestamp.
+For local testing:
+```bash
+[kvsserver]$ cargo run -- --listen-on localhost:8080
+```
 
-## Useful Commands
+### Running Transactions
 
-This repository contains two useful programs: kvscoordinator and kvsserver.
-In general, you can run `cargo run -- -h` to find the CLI options for each.
+Create a transaction file (`example.txns`):
+```
+begin
+put(user:123, 42)
+put(balance:123, 1000)
+get(user:123)
+end
 
-### KVS Coordinator options
+begin
+get(balance:123)
+put(balance:123, 1500)
+end
+```
 
+Execute transactions:
+```bash
+# Distributed cluster
+[kvscoordinator]$ cargo run -- --server-base node --num-servers 3 example.txns
+
+# Local testing
+[kvscoordinator]$ cargo run -- --localhost example.txns
+
+# Single server
+[kvscoordinator]$ cargo run -- --ip-addr 192.168.1.100 example.txns
+```
+
+### Transaction Language
+
+The transaction DSL supports the following instructions:
+- `begin`: Start a new transaction
+- `put(key, value)`: Write a key-value pair (u64 values only)
+- `get(key)`: Read a value by key
+- `end`: Complete the transaction (auto-commit/abort based on conflicts)
+
+Keywords are reserved and cannot be used as identifiers.
+Whitespace is ignored.
+
+## Command-Line Options
+
+### KVS Coordinator
 ```
 Usage: kvscoordinator [OPTIONS] <FILE_PATH>
 
@@ -62,52 +100,31 @@ Options:
   -h, --help                       Print help
 ```
 
-#### FILE_PATH argument
-
-The KVS coordinator has an ingrained transaction parser to assist in writing transactions on the fly.
-
-##### Example file:
-```
-begin
-put(hello, 42)
-get(hello)
-end
-```
-`end` used instead of something like `commit` or `abort`
-as that decision depends on context beyond this file.
-
-Whitespace is ignored, but each command should follow one of the following patterns:
-- `begin` (just "begin")
-- `put(<ID>, <VAL>)` (put followed by lparen followed by ID followed by comma followed by val followed by rparen)
-- `get(<ID>)` (get followed by lparen followed by ID followed by rparen)
-- `end`
-
-Keywords `begin`, `put,` `get`, and `end` are parsed differently from identifiers
-and should not be used as identifiers.
-
-### KVS Server options
-
-These are generally the complement to the KVS Coordinator options and do what you would expect.
-Currently we only support deployments on CloudLab LAN experiments- that is to say, the `node` prefix is assumed.
-
+### KVS Server
 ```
 Usage: kvsserver [OPTIONS]
 
 Options:
-  -p, --port <PORT>        [default: 8080]
-  -n, --node-id <NODE_ID>  [default: 0]
-  -l, --localhost
-  -h, --help               Print help
+  -l, --listen-on <LISTEN_ON>          The address for this KVS server to listen on [default: localhost:8080]
+  -s, --sometime-host <SOMETIME_HOST>  The address the SomeTime server is listening on [default: localhost:50051]
+  -h, --help                           Print help (see more with '--help')
 ```
 
 ## Prerequisites
 
-It is not strictly necessary to understand the rust programming language to use this project.
-Currently, it is meant as a supplement to projects implementing the "TrueTime" interface for timestamp ordering.
+### System Requirements
+- Rust toolchain (install via [rustup.rs](https://rustup.rs))
+- Protocol Buffers compiler (`protoc`)
 
-Otherwise, to compile and run, you will need to have a system whose hostname follows the `node{x}` pattern,
-and the following build dependencies:
+### Network Configuration
+- Servers should be accessible via `node{X}` hostnames for cluster deployment
+- Firewall rules allowing TCP communication on configured ports
+- For CloudLab deployments: standard node naming convention supported
 
-- [rust](<rustup.rs>)
-- any protobuf compiler (e.g. for Fedora 42: `rust-protobuf-devel`)
-
+### Dependencies
+All Rust dependencies are managed via Cargo:
+- `tarpc`: High-performance RPC framework
+- `dashmap`: Concurrent hash maps for storage
+- `tokio`: Async runtime
+- `tonic`: gRPC implementation
+- `clap`: Command-line argument parsing

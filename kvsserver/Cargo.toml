@@ -22,4 +22,3 @@ serde = "1.0.228"
 
 [build-dependencies]
 tonic-prost-build = "*"
-protobuf-src = "1.1"
