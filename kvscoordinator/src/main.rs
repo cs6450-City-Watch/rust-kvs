@@ -88,7 +88,8 @@ impl KvsOperation {
             if let Self::Get(key) = self {
                 let rpc_res = client.get(context::current(), tx_no, key.to_string()).await;
                 match rpc_res {
-                    Ok(Ok(key)) => return Ok(Some(key)),
+                    Ok(Ok(Some(key))) => return Ok(Some(key)),
+                    Ok(Ok(None)) => return Ok(None),
                     Ok(Err(e)) => return Err(e),
                     _ => continue,
                 }

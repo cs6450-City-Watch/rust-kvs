@@ -58,7 +58,7 @@ pub trait Kvs {
     async fn begin(tx_no: u64) -> KvsResult<()>;
 
     /// Reads the value associated with the given key within the specified transaction.
-    async fn get(tx_no: u64, key: String) -> KvsResult<u64>;
+    async fn get(tx_no: u64, key: String) -> KvsResult<Option<u64>>;
 
     /// Writes a value to the given key within the specified transaction.
     async fn put(tx_no: u64, key: String, val: u64) -> KvsResult<()>;

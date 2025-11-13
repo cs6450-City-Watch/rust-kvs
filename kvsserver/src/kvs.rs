@@ -85,28 +85,21 @@ impl Kvs for KvsServer {
     /// 2. Get the timestamp for the version to reference on read (if this is invalid, e.g. `UNIX_EPOCH`, error)
     /// 3. from the version, read the value for the key (if key doesn't map to a value, error)
     /// 4. mark the key as having been read and return the read value
-    async fn get(self, _: Context, tx_no: u64, key: String) -> KvsResult<u64> {
+    async fn get(self, _: Context, tx_no: u64, key: String) -> KvsResult<Option<u64>> {
         let tx_id = (self.0, tx_no);
         match tx_timestamps.get(&tx_id) {
             None => Err(KvsError::TransactionDoesntExist(tx_id)),
             Some(ts) => {
                 let relevant_version_ts = latest_before(*ts);
-                /*
-                println!(
-                    "tx_id: {:?} GET REQUEST own ts: {:?} rvts: {:?}",
-                    tx_id, *ts, relevant_version_ts
-                );
-                println!("tx_id: {:?} versions: {:?}", tx_id, versions.len());
-                */
                 if SystemTime::UNIX_EPOCH == relevant_version_ts {
-                    return Err(KvsError::KeyDoesntExist(key));
+                    return Ok(None);
                 }
 
                 match versions.get(&relevant_version_ts).unwrap().get(&key) {
-                    None => Err(KvsError::KeyDoesntExist(key)),
+                    None => Ok(None),
                     Some(entry) => {
                         mark_read(tx_id, *ts, key);
-                        Ok(*entry)
+                        Ok(Some(*entry))
                     }
                 }
             }
